@@ -52,15 +52,15 @@ def create_components(config: AgentConfig):
 
     # Frontend: audio-capable model
     frontend = OpenAICompatibleFrontend(
-        api_key=config.api_key,
-        base_url=config.base_url,
+        api_key=config.frontend_api_key,
+        base_url=config.frontend_base_url,
         model=config.frontend_model,
     )
 
     # Planner: text reasoning model
     planner = OpenAICompatiblePlanner(
-        api_key=config.api_key,
-        base_url=config.base_url,
+        api_key=config.planner_api_key,
+        base_url=config.planner_base_url,
         model=config.planner_model,
     )
 

@@ -7,6 +7,9 @@ Loads settings from:
 3. Default fallbacks
 
 Priority: CLI args > .env > defaults
+
+Frontend and planner each have their own API key, base URL, and model.
+No shared fallback -- specify both explicitly even if they are the same.
 """
 
 import os
@@ -29,19 +32,22 @@ class AgentConfig:
     """
     Complete configuration for running the agent.
 
-    All fields have sensible defaults for local testing.
-    Production usage should override via .env or CLI args.
+    Frontend and planner each have separate API credentials.
+    Even if using the same provider, specify both explicitly.
     """
 
-    # API settings
-    api_key: str = ""
-    base_url: str = "https://api.openai.com/v1"
+    # Frontend API settings (audio-capable model)
+    frontend_api_key: str = ""
+    frontend_base_url: str = ""
     frontend_model: str = "gpt-4o-audio-preview"
+
+    # Planner API settings (text reasoning model)
+    planner_api_key: str = ""
+    planner_base_url: str = ""
     planner_model: str = "gpt-4o"
 
     # Agent behavior
     max_steps: int = 10
-    temperature: float = 0.3
 
     # Paths
     audio_path: str = ""
@@ -56,7 +62,14 @@ class AgentConfig:
     @property
     def is_valid(self) -> bool:
         """Check if config has minimum required fields to run."""
-        return bool(self.api_key and self.audio_path and self.question)
+        return bool(
+            self.frontend_api_key
+            and self.frontend_base_url
+            and self.planner_api_key
+            and self.planner_base_url
+            and self.audio_path
+            and self.question
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,19 +79,34 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py --audio test.wav --question "What is happening?" --api-key sk-xxx
-  python main.py --audio test.wav --question "What is happening?" --model gpt-4o
+  # Both frontend and planner use the same provider (specify both explicitly)
+  python main.py --audio test.wav --question "What is happening?" \
+      --frontend-api-key sk-key-1 --frontend-base-url https://api.xxx/v1 \
+      --planner-api-key sk-key-1 --planner-base-url https://api.xxx/v1
+
+  # Frontend and planner use different providers
+  python main.py --audio test.wav --question "What is happening?" \
+      --frontend-api-key sk-dashscope-key --frontend-base-url https://dashscope... \
+      --planner-api-key sk-openai-key --planner-base-url https://api.openai.com/v1
         """,
     )
 
+    # Audio + Question (always required)
     parser.add_argument("--audio", required=True, help="Path to the audio file")
     parser.add_argument("--question", required=True, help="Question about the audio")
-    parser.add_argument("--api-key", default="", help="API key (or set in .env)")
-    parser.add_argument("--base-url", default="", help="API base URL")
-    parser.add_argument("--frontend-model", default="", help="Frontend model name")
-    parser.add_argument("--planner-model", default="", help="Planner model name")
+
+    # Frontend-specific API settings
+    parser.add_argument("--frontend-api-key", default="", help="Frontend (audio model) API key")
+    parser.add_argument("--frontend-base-url", default="", help="Frontend API base URL")
+    parser.add_argument("--frontend-model", default="", help="Frontend model name (e.g., gpt-4o-audio-preview, qwen3-omni-flash)")
+
+    # Planner-specific API settings
+    parser.add_argument("--planner-api-key", default="", help="Planner (text model) API key")
+    parser.add_argument("--planner-base-url", default="", help="Planner API base URL")
+    parser.add_argument("--planner-model", default="", help="Planner model name (e.g., gpt-4o)")
+
+    # Other settings
     parser.add_argument("--max-steps", type=int, default=0, help="Max agent steps")
-    parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--trace", action="store_true", help="Enable execution tracing")
     parser.add_argument("--trace-dir", default=".", help="Directory for trace output files")
@@ -89,6 +117,8 @@ Examples:
 def load_config(argv: list[str] | None = None) -> AgentConfig:
     """
     Load configuration from .env + CLI args.
+
+    Priority: CLI args > env vars > defaults
 
     Args:
         argv: Command-line arguments (defaults to sys.argv[1:])
@@ -118,21 +148,19 @@ def load_config(argv: list[str] | None = None) -> AgentConfig:
             return int(env_value)
         return default
 
-    def pick_float(cli_value: float, env_name: str, default: float) -> float:
-        if cli_value != 0.0:
-            return cli_value
-        env_value = os.environ.get(env_name, "")
-        if env_value:
-            return float(env_value)
-        return default
-
     config = AgentConfig(
-        api_key=pick(args.api_key, "API_KEY", ""),
-        base_url=pick(args.base_url, "BASE_URL", "https://api-2.xi-ai.cn/v1"),
+        # Frontend specific
+        frontend_api_key=pick(args.frontend_api_key, "FRONTEND_API_KEY", ""),
+        frontend_base_url=pick(args.frontend_base_url, "FRONTEND_BASE_URL", ""),
         frontend_model=pick(args.frontend_model, "FRONTEND_MODEL", "gpt-4o-audio-preview"),
+
+        # Planner specific
+        planner_api_key=pick(args.planner_api_key, "PLANNER_API_KEY", ""),
+        planner_base_url=pick(args.planner_base_url, "PLANNER_BASE_URL", ""),
         planner_model=pick(args.planner_model, "PLANNER_MODEL", "gpt-4o"),
+
+        # Other
         max_steps=pick_int(args.max_steps, "MAX_STEPS", 10),
-        temperature=pick_float(args.temperature, "TEMPERATURE", 0.3),
         audio_path=args.audio,
         question=args.question,
         verbose=args.verbose,

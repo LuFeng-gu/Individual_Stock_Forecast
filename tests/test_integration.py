@@ -29,18 +29,27 @@ class TestConfig(unittest.TestCase):
         config = load_config([
             "--audio", "test.wav",
             "--question", "What is this?",
-            "--api-key", "sk-test",
+            "--frontend-api-key", "sk-fe-test",
+            "--frontend-base-url", "https://fe.example.com",
+            "--planner-api-key", "sk-pl-test",
+            "--planner-base-url", "https://pl.example.com",
             "--max-steps", "5",
         ])
         self.assertEqual(config.audio_path, "test.wav")
         self.assertEqual(config.question, "What is this?")
-        self.assertEqual(config.api_key, "sk-test")
+        self.assertEqual(config.frontend_api_key, "sk-fe-test")
+        self.assertEqual(config.frontend_base_url, "https://fe.example.com")
+        self.assertEqual(config.planner_api_key, "sk-pl-test")
+        self.assertEqual(config.planner_base_url, "https://pl.example.com")
         self.assertEqual(config.max_steps, 5)
 
     def test_config_valid(self):
         """Valid config passes is_valid check."""
         config = AgentConfig(
-            api_key="sk-test",
+            frontend_api_key="sk-fe-test",
+            frontend_base_url="https://fe.example.com",
+            planner_api_key="sk-pl-test",
+            planner_base_url="https://pl.example.com",
             audio_path="test.wav",
             question="What?",
         )
@@ -103,7 +112,10 @@ class TestRunAgent(unittest.TestCase):
     def test_run_agent_success(self):
         """Full agent run should return answered state."""
         config = AgentConfig(
-            api_key="sk-test",
+            frontend_api_key="sk-fe-test",
+            frontend_base_url="https://fe.example.com",
+            planner_api_key="sk-pl-test",
+            planner_base_url="https://pl.example.com",
             audio_path="fake.wav",
             question="What is this?",
             max_steps=5,

@@ -28,19 +28,22 @@ class OpenAICompatibleFrontend(BaseFrontend):
     Supports providers like:
     - OpenAI (gpt-4o-audio-preview)
     - xi-ai.cn (gpt-4o-audio-preview, gpt-audio)
-    - DashScope / Alibaba Cloud (qwen3-omni-flash)
+    - DashScope / Alibaba Cloud (qwen3-omni-flash, qwen3.5-omni-plus)
     - Any other OpenAI-compatible endpoint
     
-    For audio-native models (gpt-4o-audio-preview), you MUST set:
+    For gpt-4o-audio-preview, pass modalities and audio explicitly:
         modalities=["text", "audio"]
         audio={"voice": "alloy", "format": "wav"}
+    
+    For DashScope qwen3-omni models, leave modalities/audio as None
+    (the API only needs the input_audio message block).
     
     Args:
         model: Model name (default: "gpt-4o-audio-preview")
         api_key: API key. If None, reads from environment variable.
         base_url: API base URL
-        modalities: OpenAI modalities param for audio models
-        audio: OpenAI audio config for audio models
+        modalities: OpenAI modalities param. Pass None to omit (e.g., for DashScope).
+        audio: OpenAI audio config. Pass None to omit (e.g., for DashScope).
         max_retries: Number of retries on API failure
     """
 
@@ -56,8 +59,8 @@ class OpenAICompatibleFrontend(BaseFrontend):
         self._model = model
         self._api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
         self._base_url = base_url
-        self._modalities = modalities or ["text", "audio"]
-        self._audio = audio or {"voice": "alloy", "format": "wav"}
+        self._modalities = modalities
+        self._audio = audio
         self._max_retries = max_retries
 
         if not self._api_key:
@@ -76,6 +79,7 @@ class OpenAICompatibleFrontend(BaseFrontend):
         self._client = OpenAI(
             api_key=self._api_key,
             base_url=self._base_url,
+            timeout=60.0,
         )
 
     @property
@@ -103,7 +107,7 @@ class OpenAICompatibleFrontend(BaseFrontend):
 
         # Step 2: Read and encode audio
         try:
-            audio_base64 = self._encode_audio(audio_path)
+            audio_data_url, audio_format = self._encode_audio(audio_path)
         except Exception as e:
             raise FrontendError(
                 f"Failed to read/encode audio: {e}",
@@ -122,7 +126,7 @@ class OpenAICompatibleFrontend(BaseFrontend):
         
         # Step 4: Call API
         try:
-            caption = self._call_api(system_prompt, user_prompt, audio_base64, audio_path)
+            caption = self._call_api(system_prompt, user_prompt, audio_data_url, audio_format)
         except Exception as e:
             log_error("frontend.run", e)
             raise FrontendError(
@@ -152,7 +156,7 @@ class OpenAICompatibleFrontend(BaseFrontend):
         if not os.path.exists(audio_path):
             raise FrontendError(f"Audio file not found: {audio_path}")
 
-        audio_base64 = self._encode_audio(audio_path)
+        audio_data_url, audio_format = self._encode_audio(audio_path)
 
         evidence_summary = context.get("evidence_summary", "")
         initial_plan = context.get("initial_plan", {})
@@ -170,16 +174,23 @@ class OpenAICompatibleFrontend(BaseFrontend):
         ]
         user_prompt = "\n".join(user_parts)
 
-        answer = self._call_api(system_prompt, user_prompt, audio_base64, audio_path)
+        answer = self._call_api(system_prompt, user_prompt, audio_data_url, audio_format)
         
         log_node_end("frontend.generate_final_answer", {"answer_length": len(answer)})
         return answer
 
-    def _encode_audio(self, audio_path: str) -> str:
-        """Read audio file and return base64-encoded string."""
+    def _encode_audio(self, audio_path: str) -> tuple[str, str]:
+        """
+        Read audio file and return base64 data URL + format.
+        
+        Returns:
+            Tuple of (data_url, audio_format)
+            data_url format: data:;base64,{encoded_data}
+        """
         with open(audio_path, "rb") as f:
             audio_bytes = f.read()
-        return base64.b64encode(audio_bytes).decode("utf-8")
+        audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+        return f"data:;base64,{audio_base64}", self._get_audio_format(audio_path)
 
     def _load_prompt(self, prompt_name: str) -> str:
         """Load a prompt from the prompts/ directory."""
@@ -198,15 +209,20 @@ class OpenAICompatibleFrontend(BaseFrontend):
         self,
         system_prompt: str,
         user_prompt: str,
-        audio_base64: str,
-        audio_path: str,
+        audio_data_url: str,
+        audio_format: str,
     ) -> str:
         """
         Make the actual API call.
         
-        KEY CHANGE: For audio-native models (gpt-4o-audio-preview),
-        we must pass modalities + audio params, and read the result
-        from message.audio.transcript instead of message.content.
+        For DashScope qwen3-omni models:
+        - audio_data_url must be "data:;base64,{xxx}" format
+        - modalities and audio params should NOT be passed
+        - Result is read from msg.content
+        
+        For gpt-4o-audio-preview:
+        - Pass modalities=["text", "audio"] and audio={"voice":...} explicitly
+        - Result may be in msg.audio.transcript
         """
         messages = [
             {"role": "system", "content": system_prompt},
@@ -217,8 +233,8 @@ class OpenAICompatibleFrontend(BaseFrontend):
                     {
                         "type": "input_audio",
                         "input_audio": {
-                            "data": audio_base64,
-                            "format": self._get_audio_format(audio_path),
+                            "data": audio_data_url,
+                            "format": audio_format,
                         },
                     },
                 ],
@@ -230,20 +246,27 @@ class OpenAICompatibleFrontend(BaseFrontend):
         last_error = None
         for attempt in range(self._max_retries):
             try:
-                response = self._client.chat.completions.create(
-                    model=self._model,
-                    messages=messages,
-                    modalities=self._modalities,
-                    audio=self._audio,
-                    temperature=0.3,
-                )
+                # Build kwargs conditionally
+                kwargs = {
+                    "model": self._model,
+                    "messages": messages,
+                    "temperature": 0.3,
+                    "max_tokens": 2048,
+                }
+                if self._modalities is not None:
+                    kwargs["modalities"] = self._modalities
+                if self._audio is not None:
+                    kwargs["audio"] = self._audio
                 
-                # KEY CHANGE: Try audio transcript first, fallback to content
+                response = self._client.chat.completions.create(**kwargs)
+                
                 msg = response.choices[0].message
                 
-                if hasattr(msg, "audio") and msg.audio and hasattr(msg.audio, "transcript"):
+                # For gpt-4o-audio-preview, try audio transcript first
+                if self._modalities is not None and hasattr(msg, "audio") and msg.audio and hasattr(msg.audio, "transcript"):
                     return msg.audio.transcript or ""
                 
+                # Default: read text content (works for DashScope and standard models)
                 return msg.content or ""
                 
             except (APIError, APIConnectionError, RateLimitError) as e:

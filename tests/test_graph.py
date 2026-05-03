@@ -69,7 +69,7 @@ class MockPlanner(BasePlanner):
     def generate_question_oriented_prompt(self, question: str) -> str:
         return f"Analyze this audio for: {question}"
 
-    def plan(self, question, frontend_output=None):
+    def plan(self, question, frontend_output=None, available_tools=None):
         return InitialPlan(
             approach="Mock approach",
             focus_points=["mock_point"],

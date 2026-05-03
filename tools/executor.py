@@ -67,7 +67,11 @@ class ToolExecutor:
         start_time = time.time()
         
         try:
-            result = tool.invoke(request)
+            # MCP adapters may need async invocation when already inside an event loop
+            if hasattr(tool, "_async_invoke"):
+                result = await tool._async_invoke(request)
+            else:
+                result = tool.invoke(request)
         except ToolExecutionError:
             raise
         except Exception as e:

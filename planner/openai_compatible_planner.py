@@ -101,7 +101,12 @@ class OpenAICompatiblePlanner(BasePlanner):
         log_node_end("planner.generate_question_oriented_prompt", {"length": len(prompt)})
         return prompt
 
-    def plan(self, question: str, frontend_output: FrontendOutput | None = None) -> InitialPlan:
+    def plan(
+        self,
+        question: str,
+        frontend_output: FrontendOutput | None = None,
+        available_tools: list[ToolSpec] | None = None,
+    ) -> InitialPlan:
         """
         Create initial plan from question and frontend caption.
         
@@ -115,10 +120,12 @@ class OpenAICompatiblePlanner(BasePlanner):
         user_template = self._load_prompt("plan_user")
         
         caption = frontend_output.question_guided_caption if frontend_output else "No caption available"
+        tools_text = self._format_tools(available_tools or [])
         
         user_prompt = user_template.format(
             question=question,
             caption=caption,
+            available_tools=tools_text,
         )
         
         try:

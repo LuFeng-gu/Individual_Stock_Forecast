@@ -38,7 +38,12 @@ class BasePlanner(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def plan(self, question: str, frontend_output: FrontendOutput | None = None) -> InitialPlan:
+    def plan(
+        self,
+        question: str,
+        frontend_output: FrontendOutput | None = None,
+        available_tools: list[ToolSpec] | None = None,
+    ) -> InitialPlan:
         """
         Build an initial plan using question and optional frontend caption.
         
@@ -47,6 +52,7 @@ class BasePlanner(ABC):
         Args:
             question: User's question about the audio
             frontend_output: Caption from the frontend (may be None initially)
+            available_tools: List of tools actually registered in the system
         
         Returns:
             InitialPlan with approach, focus_points, etc.

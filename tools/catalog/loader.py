@@ -78,7 +78,13 @@ async def register_all_mcp_tools(
         name = config_data.get("name", tool_dir.name)
         server_config = config_data.get("server", {})
         command = server_config.get("command", [])
-        working_dir = server_config.get("working_dir", str(tool_dir))
+        working_dir_raw = server_config.get("working_dir", str(tool_dir))
+        # Resolve relative working_dir against tool_dir so "." means the tool's own directory
+        working_dir_path = Path(working_dir_raw)
+        if not working_dir_path.is_absolute():
+            working_dir = str(tool_dir / working_dir_path)
+        else:
+            working_dir = str(working_dir_path)
         env = server_config.get("env", {})
         
         if not command:

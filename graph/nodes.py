@@ -95,7 +95,7 @@ def frontend_evidence_node(
     }
 
 
-def initial_plan_node(state: AgentState, planner: BasePlanner) -> dict:
+def initial_plan_node(state: AgentState, planner: BasePlanner, registry: ToolRegistry) -> dict:
     """
     Generate the initial plan from question + frontend caption.
 
@@ -105,6 +105,7 @@ def initial_plan_node(state: AgentState, planner: BasePlanner) -> dict:
     plan = planner.plan(
         question=state["question"],
         frontend_output=state.get("initial_frontend_output"),
+        available_tools=registry.list_specs(),
     )
     log_node_end("initial_plan_node")
     log_info("initial_plan", {"approach_preview": plan.approach[:80]})

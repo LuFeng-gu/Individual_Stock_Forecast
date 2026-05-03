@@ -99,7 +99,7 @@ def build_agent_graph(
     # ------------------------------------------------------------------
     bound_prompt = bind(initial_prompt_node, planner=planner)
     bound_frontend = bind(frontend_evidence_node, frontend=frontend, fusion=fusion)
-    bound_plan = bind(initial_plan_node, planner=planner)
+    bound_plan = bind(initial_plan_node, planner=planner, registry=registry)
     bound_decide = bind(planner_decision_node, planner=planner, registry=registry)
     bound_execute = bind(tool_executor_node, executor=executor)
     bound_fuse = bind(evidence_fusion_node, fusion=fusion)

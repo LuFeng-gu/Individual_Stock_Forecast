@@ -85,7 +85,7 @@ def test_plan(planner: OpenAICompatiblePlanner):
     print("  Calling API...")
     
     try:
-        plan = planner.plan(question, caption)
+        plan = planner.plan(question, caption, available_tools=[])
         print(f"\n  === PLAN ===")
         print(f"  Approach: {plan.approach}")
         print(f"  Focus: {plan.focus_points}")
@@ -112,7 +112,8 @@ def test_decide(planner: OpenAICompatiblePlanner):
     )
     state["initial_plan"] = planner.plan(
         "What language is spoken?",
-        state["initial_frontend_output"]
+        state["initial_frontend_output"],
+        available_tools=[],
     )
     
     # Mock available tools

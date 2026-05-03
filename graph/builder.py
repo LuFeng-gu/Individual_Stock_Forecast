@@ -1,8 +1,17 @@
 """
-Build and compile the LangGraph agent workflow.
+Build and compile the LangGraph stock forecast agent workflow.
 
 This module wires all nodes together into a StateGraph and defines
 the conditional edges that create the agent's decision loop.
+
+Phase 2 Graph:
+    START → intent_clarification → market_structure → sector_router
+                                                          ↓
+            technical → fundamental → capital → sentiment → cross_sector_fusion
+                                                                          ↓
+            final_answer → END
+                                              ↓
+                                           failure → END
 """
 
 from functools import partial
@@ -10,153 +19,99 @@ from functools import partial
 from langgraph.graph import StateGraph, END
 
 from core.state import AgentState
+from core.constants import AgentStatus
 from core.logging import log_info, log_error
-from frontend.base import BaseFrontend
 from planner.base import BasePlanner
-from fusion.base import BaseFusion
-from tools.registry import ToolRegistry
-from tools.executor import ToolExecutor
 from graph.trace import make_traced_node, clear_trace
 from graph.nodes import (
-    initial_prompt_node,
-    frontend_evidence_node,
-    initial_plan_node,
-    planner_decision_node,
-    tool_executor_node,
-    evidence_fusion_node,
-    evidence_summarization_node,
+    intent_clarification_node,
+    market_structure_node,
+    sector_router_node,
+    technical_analysis_node,
+    fundamental_analysis_node,
+    capital_analysis_node,
+    sentiment_analysis_node,
+    cross_sector_fusion_node,
     final_answer_node,
     failure_node,
 )
 
 
-def _route_after_decision(state: AgentState) -> str:
-    """
-    Conditional routing after planner_decision_node.
-
-    Reads the planner's decision and routes to:
-    - "evidence_summarization" if ANSWER
-    - "tool_executor" if CALL_TOOL
-    - "failure" if FAIL or max_steps exceeded
-    """
-    step_count = state.get("step_count", 0)
-    max_steps = state.get("max_steps", 10)
-    decision = state.get("current_decision")
-
-    # Guard: force failure if max steps reached
-    if step_count >= max_steps:
-        log_error("router", RuntimeError(f"Max steps ({max_steps}) reached"))
+def _route_after_structure(state: AgentState) -> str:
+    """Conditional routing after market_structure_node."""
+    status = state.get("status")
+    if status == AgentStatus.FAILED:
         return "failure"
-
-    if not decision:
-        log_error("router", RuntimeError("No decision found in state"))
-        return "failure"
-
-    action = decision.action.value if hasattr(decision.action, "value") else decision.action
-
-    if action == "answer":
-        return "evidence_summarization"
-    elif action == "call_tool":
-        return "tool_executor"
-    else:
-        return "failure"
+    return "sector_router"
 
 
 def build_agent_graph(
     planner: BasePlanner,
-    frontend: BaseFrontend,
-    fusion: BaseFusion,
-    executor: ToolExecutor,
-    registry: ToolRegistry,
     enable_trace: bool = False,
 ) -> StateGraph:
     """
-    Build and compile the complete agent workflow graph.
-
-    Args:
-        planner: Decision-making component
-        frontend: Audio understanding component
-        fusion: Evidence conversion component
-        executor: Tool execution component
-        registry: Tool registration component
-        enable_trace: If True, wrap all nodes to record input/output
+    Build and compile the Phase 2 stock forecast agent workflow graph.
 
     Returns:
         A compiled LangGraph ready to be invoked with an AgentState
     """
-    log_info("graph_builder", {"event": "building_graph", "trace": enable_trace})
+    log_info("graph_builder", {"event": "building_graph", "phase": 2, "trace": enable_trace})
 
     if enable_trace:
         clear_trace()
 
-    # Helper to optionally wrap a node with tracer
     def bind(node_func, **kwargs):
         wrapped = make_traced_node(node_func, node_func.__name__) if enable_trace else node_func
         return partial(wrapped, **kwargs)
 
-    # ------------------------------------------------------------------
-    # Bind dependencies to node functions via partial
-    # ------------------------------------------------------------------
-    bound_prompt = bind(initial_prompt_node, planner=planner)
-    bound_frontend = bind(frontend_evidence_node, frontend=frontend, fusion=fusion)
-    bound_plan = bind(initial_plan_node, planner=planner, registry=registry)
-    bound_decide = bind(planner_decision_node, planner=planner, registry=registry)
-    bound_execute = bind(tool_executor_node, executor=executor)
-    bound_fuse = bind(evidence_fusion_node, fusion=fusion)
-    bound_summarize = bind(evidence_summarization_node, planner=planner)
-    bound_answer = bind(final_answer_node, frontend=frontend)
+    # Bind planner to all nodes that need it
+    bound_intent = bind(intent_clarification_node, planner=planner)
+    bound_structure = bind(market_structure_node, planner=planner)
+    bound_router = bind(sector_router_node, planner=planner)
+    bound_technical = bind(technical_analysis_node, planner=planner)
+    bound_fundamental = bind(fundamental_analysis_node, planner=planner)
+    bound_capital = bind(capital_analysis_node, planner=planner)
+    bound_sentiment = bind(sentiment_analysis_node, planner=planner)
+    bound_fusion = bind(cross_sector_fusion_node, planner=planner)
+    bound_answer = bind(final_answer_node, planner=planner)
     bound_fail = make_traced_node(failure_node, "failure_node") if enable_trace else failure_node
 
-    # ------------------------------------------------------------------
-    # Create the graph
-    # ------------------------------------------------------------------
+    # Create graph
     graph = StateGraph(AgentState)
 
-    # ------------------------------------------------------------------
     # Add nodes
-    # ------------------------------------------------------------------
-    graph.add_node("initial_prompt", bound_prompt)
-    graph.add_node("frontend_evidence", bound_frontend)
-    graph.add_node("initial_plan", bound_plan)
-    graph.add_node("planner_decision", bound_decide)
-    graph.add_node("tool_executor", bound_execute)
-    graph.add_node("evidence_fusion", bound_fuse)
-    graph.add_node("evidence_summarization", bound_summarize)
+    graph.add_node("intent_clarification", bound_intent)
+    graph.add_node("market_structure", bound_structure)
+    graph.add_node("sector_router", bound_router)
+    graph.add_node("technical", bound_technical)
+    graph.add_node("fundamental", bound_fundamental)
+    graph.add_node("capital", bound_capital)
+    graph.add_node("sentiment", bound_sentiment)
+    graph.add_node("cross_sector_fusion", bound_fusion)
     graph.add_node("final_answer", bound_answer)
     graph.add_node("failure", bound_fail)
 
-    # ------------------------------------------------------------------
     # Define edges
-    # ------------------------------------------------------------------
-    # Entry point
-    graph.set_entry_point("initial_prompt")
+    graph.set_entry_point("intent_clarification")
+    graph.add_edge("intent_clarification", "market_structure")
 
-    # Linear startup sequence
-    graph.add_edge("initial_prompt", "frontend_evidence")
-    graph.add_edge("frontend_evidence", "initial_plan")
-    graph.add_edge("initial_plan", "planner_decision")
-
-    # Conditional branch from decision
+    # Conditional routing after market_structure
     graph.add_conditional_edges(
-        "planner_decision",
-        _route_after_decision,
-        {
-            "evidence_summarization": "evidence_summarization",
-            "tool_executor": "tool_executor",
-            "failure": "failure",
-        },
+        "market_structure",
+        _route_after_structure,
+        {"sector_router": "sector_router", "failure": "failure"},
     )
 
-    # Tool execution loop
-    graph.add_edge("tool_executor", "evidence_fusion")
-    graph.add_edge("evidence_fusion", "planner_decision")
+    # Sequential factor analysis chain
+    graph.add_edge("sector_router", "technical")
+    graph.add_edge("technical", "fundamental")
+    graph.add_edge("fundamental", "capital")
+    graph.add_edge("capital", "sentiment")
+    graph.add_edge("sentiment", "cross_sector_fusion")
+    graph.add_edge("cross_sector_fusion", "final_answer")
 
-    # Answer path
-    graph.add_edge("evidence_summarization", "final_answer")
     graph.add_edge("final_answer", END)
-
-    # Failure path
     graph.add_edge("failure", END)
 
-    log_info("graph_builder", {"event": "graph_built"})
+    log_info("graph_builder", {"event": "graph_built", "phase": 2})
     return graph.compile()

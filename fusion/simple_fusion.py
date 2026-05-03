@@ -1,13 +1,13 @@
 """
 Simple fusion implementation.
 
-Converts frontend and tool outputs into EvidenceItem objects with straightforward
-serialization. No deduplication or advanced merging -- just clean conversion.
+Converts tool outputs into EvidenceItem objects with straightforward
+serialization. No deduplication or advanced merging.
 """
 
 import json
 
-from core.schemas import FrontendOutput, ToolResult, EvidenceItem
+from core.schemas import ToolResult, EvidenceItem
 from core.errors import FusionError
 from fusion.base import BaseFusion
 
@@ -16,7 +16,6 @@ class SimpleFusion(BaseFusion):
     """
     Simple evidence fusion with JSON serialization and basic validation.
 
-    - Frontend captions are stored as-is with source="frontend"
     - Tool results are JSON-serialized with source=tool_name
     - Format checks: non-empty content, valid confidence range
     """
@@ -24,31 +23,6 @@ class SimpleFusion(BaseFusion):
     @property
     def name(self) -> str:
         return "simple_fusion"
-
-    def frontend_to_evidence(self, frontend_output: FrontendOutput) -> EvidenceItem:
-        """
-        Convert a frontend caption into an EvidenceItem.
-
-        The caption is stored as plain text. Confidence is set to a default
-        of 0.8 since frontend captions are generally high-quality evidence.
-        """
-        caption = frontend_output.question_guided_caption
-        if not caption or not caption.strip():
-            raise FusionError(
-                "Frontend caption is empty",
-                details={"frontend_output": str(frontend_output)},
-            )
-
-        return EvidenceItem(
-            source="frontend",
-            content=caption.strip(),
-            evidence_type="caption",
-            confidence=0.8,
-            metadata={
-                "model": getattr(frontend_output, "model", None),
-                "timestamp": frontend_output.timestamp.isoformat(),
-            },
-        )
 
     def tool_result_to_evidence(self, tool_result: ToolResult) -> EvidenceItem:
         """

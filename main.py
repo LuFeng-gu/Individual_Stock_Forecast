@@ -1,40 +1,35 @@
 """
-Main entry point for the audio agent.
+Main entry point for the stock forecast agent.
 
 Usage:
-    # With API key via CLI
-    python main.py --audio test.wav --question "What is happening?" --api-key sk-xxx
+    # Basic analysis
+    python main.py --query "帮我看看贵州茅台怎么样" --planner-api-key sk-xxx --planner-base-url https://api.xxx/v1
 
-    # With API key in .env file (auto-loaded)
-    python main.py --audio test.wav --question "What is happening?"
+    # Short-term trade advice
+    python main.py --query "明天茅台能买吗" --planner-api-key sk-xxx --planner-base-url https://api.xxx/v1
 
-    # With execution tracing enabled
-    python main.py --audio test.wav --question "What is happening?" --trace --trace-dir ./traces
+    # With tracing
+    python main.py --query "分析一下宁德时代" --planner-api-key sk-xxx --planner-base-url https://api.xxx/v1 --trace
 
 This script:
 1. Loads configuration (.env + CLI args)
-2. Creates all agent components
-3. Builds the LangGraph workflow
-4. Runs the agent on the given audio + question
-5. Prints the final answer
-6. Optionally writes trace files (trace.jsonl + trace_report.md)
+2. Creates the planner component
+3. Builds the LangGraph workflow (Phase 1)
+4. Runs the agent on the given query
+5. Prints the final report
+6. Optionally writes trace files
 """
 
 import sys
 from pathlib import Path
 
-# Ensure project root is on path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import load_config, AgentConfig
 from core.state import create_initial_state
 from core.constants import AgentStatus
 from core.logging import log_info, log_error
-from frontend import OpenAICompatibleFrontend
 from planner import OpenAICompatiblePlanner
-from fusion import SimpleFusion
-from tools import ToolRegistry, ToolExecutor, register_all_mcp_tools
-from tools.mcp import MCPServerManager
 from graph import build_agent_graph, write_traces, set_trace_dir
 
 
@@ -42,70 +37,40 @@ def create_components(config: AgentConfig):
     """
     Create and wire all agent components.
 
-    Args:
-        config: Loaded agent configuration
+    Phase 1: Only the planner is needed (for intent clarification
+    and market structure analysis).
 
     Returns:
-        Tuple of (frontend, planner, fusion, executor, registry)
+        Tuple of (planner,)
     """
     log_info("main", {"event": "creating_components"})
 
-    # Frontend: audio-capable model
-    frontend = OpenAICompatibleFrontend(
-        api_key=config.frontend_api_key,
-        base_url=config.frontend_base_url,
-        model=config.frontend_model,
-    )
-
-    # Planner: text reasoning model
     planner = OpenAICompatiblePlanner(
         api_key=config.planner_api_key,
         base_url=config.planner_base_url,
         model=config.planner_model,
     )
 
-    # Fusion: evidence conversion
-    fusion = SimpleFusion()
-
-    # Tools: registry + executor
-    registry = ToolRegistry()
-    executor = ToolExecutor(registry)
-
-    # Auto-discover MCP tools from catalog/
-    log_info("main", {"event": "scanning_catalog"})
-    server_manager = MCPServerManager()
-    # Note: register_all_mcp_tools is async, but we run it sync here
-    import asyncio
-    try:
-        asyncio.run(register_all_mcp_tools(registry, server_manager, verbose=config.verbose))
-    except RuntimeError:
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(register_all_mcp_tools(registry, server_manager, verbose=config.verbose))
-    except Exception as e:
-        log_error("main", RuntimeError(f"MCP catalog scan failed: {e}"))
-
-    tool_specs = registry.list_specs()
-    log_info("main", {"event": "components_ready", "tools_registered": len(tool_specs)})
-
-    return frontend, planner, fusion, executor, registry
+    log_info("main", {"event": "components_ready"})
+    return planner
 
 
 def run_agent(config: AgentConfig):
     """
-    Run the agent on a single audio file + question.
+    Run the stock forecast agent on a single user query.
 
     Args:
-        config: Agent configuration with audio_path, question, api_key, etc.
+        config: Agent configuration with query, api_key, etc.
 
     Returns:
         Final agent state dictionary
     """
     if not config.is_valid:
-        print("Error: Missing required configuration. Need --audio, --question, and --api-key")
+        print("Error: Missing required configuration. Need --query, --planner-api-key, and --planner-base-url")
         sys.exit(1)
 
     # Create components
-    frontend, planner, fusion, executor, registry = create_components(config)
+    planner = create_components(config)
 
     # Setup trace if enabled
     if config.trace:
@@ -114,19 +79,15 @@ def run_agent(config: AgentConfig):
 
     # Build graph
     graph = build_agent_graph(
-        planner, frontend, fusion, executor, registry,
+        planner=planner,
         enable_trace=config.trace,
     )
 
     # Create initial state
-    initial_state = create_initial_state(
-        question=config.question,
-        audio_path=config.audio_path,
-        max_steps=config.max_steps,
-    )
+    initial_state = create_initial_state(query=config.query)
 
     # Run!
-    log_info("main", {"event": "graph_invoke_start", "question": config.question})
+    log_info("main", {"event": "graph_invoke_start", "query": config.query})
     try:
         final_state = graph.invoke(initial_state)
         log_info("main", {"event": "graph_invoke_end", "status": final_state.get("status")})
@@ -134,7 +95,6 @@ def run_agent(config: AgentConfig):
         log_error("main", RuntimeError(f"Agent execution failed: {e}"))
         final_state = {"status": "failed", "error_message": str(e)}
     finally:
-        # Write traces even if execution failed
         if config.trace:
             jsonl_path, md_path = write_traces(config.trace_dir)
             if jsonl_path:
@@ -155,10 +115,7 @@ def print_results(final_state: dict):
     if status == AgentStatus.ANSWERED:
         final_answer = final_state.get("final_answer")
         if final_answer:
-            print(f"\nAnswer: {final_answer.answer}")
-            print(f"Confidence: {final_answer.confidence}")
-            if final_answer.evidence_summary:
-                print(f"\nEvidence Summary:\n{final_answer.evidence_summary}")
+            print(f"\n{final_answer.answer}")
         else:
             print("\nStatus: ANSWERED but no final_answer found")
 
@@ -169,14 +126,8 @@ def print_results(final_state: dict):
     else:
         print(f"\nUnexpected final status: {status}")
 
-    # Debug info
-    step_count = final_state.get("step_count", 0)
-    tool_history = final_state.get("tool_call_history", [])
     evidence_count = len(final_state.get("evidence_log", []))
-
-    print(f"\nSteps taken: {step_count}")
-    print(f"Tools called: {len(tool_history)}")
-    print(f"Evidence items: {evidence_count}")
+    print(f"\nEvidence items: {evidence_count}")
     print("=" * 60)
 
 

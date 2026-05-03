@@ -2,30 +2,29 @@
 Core module: contracts, state, and utilities.
 
 This package contains the foundational data structures and constants
-used by all other modules in the agent framework.
+used by all other modules in the stock forecast agent framework.
 """
 
 from core.constants import AgentStatus
 from core.errors import (
-    AudioAgentError,
-    FrontendError,
+    StockForecastAgentError,
     PlannerError,
     ToolExecutionError,
     FusionError,
     StateValidationError,
 )
 from core.schemas import (
-    PlannerActionType,
-    FrontendInput,
-    FrontendOutput,
     EvidenceItem,
     ToolSpec,
     ToolCallRequest,
     ToolResult,
     ToolCallRecord,
-    ExecutionStep,
-    InitialPlan,
-    PlannerDecision,
+    UserIntent,
+    MarketStructure,
+    SectorRoute,
+    FactorEvidence,
+    CompositeAssessment,
+    StrategyDecision,
     FinalAnswer,
 )
 from core.state import AgentState, create_initial_state
@@ -41,24 +40,23 @@ __all__ = [
     # Constants
     "AgentStatus",
     # Errors
-    "AudioAgentError",
-    "FrontendError",
+    "StockForecastAgentError",
     "PlannerError",
     "ToolExecutionError",
     "FusionError",
     "StateValidationError",
     # Schemas
-    "PlannerActionType",
-    "FrontendInput",
-    "FrontendOutput",
     "EvidenceItem",
     "ToolSpec",
     "ToolCallRequest",
     "ToolResult",
     "ToolCallRecord",
-    "ExecutionStep",
-    "InitialPlan",
-    "PlannerDecision",
+    "UserIntent",
+    "MarketStructure",
+    "SectorRoute",
+    "FactorEvidence",
+    "CompositeAssessment",
+    "StrategyDecision",
     "FinalAnswer",
     # State
     "AgentState",

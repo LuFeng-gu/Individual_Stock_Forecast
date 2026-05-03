@@ -175,13 +175,6 @@ def write_traces(trace_dir: str | Path | None = None) -> tuple[Path, Path]:
                 lines.append(f"> **Data**: `{json.dumps(out_data, ensure_ascii=False, default=str)}`")
                 lines.append("")
 
-        elif node_name == "frontend_evidence_node":
-            fe = output.get("initial_frontend_output", {})
-            if fe:
-                caption = fe.get("question_guided_caption", "")
-                lines.append(f"> **Caption**: {caption}")
-                lines.append("")
-
         elif node_name == "final_answer_node":
             final = output.get("final_answer", {})
             if final:

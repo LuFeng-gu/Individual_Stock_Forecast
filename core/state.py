@@ -2,39 +2,35 @@
 Agent state definition for LangGraph.
 
 This module defines the central state object that flows through every node
-in the graph. Think of it as the agent's "memory" — every node reads from
-it and writes updates back to it.
-
-LangGraph uses TypedDict (not a regular class) because it needs to merge
-partial updates from each node efficiently.
+in the graph. Think of it as the agent's "memory".
 """
 
 from typing import TypedDict, Annotated, Any
-from operator import add
 
 from core.schemas import (
-    FrontendOutput,
-    InitialPlan,
     EvidenceItem,
-    ToolCallRecord,
-    PlannerDecision,
+    UserIntent,
+    MarketStructure,
+    SectorRoute,
+    FactorEvidence,
+    CompositeAssessment,
+    StrategyDecision,
     FinalAnswer,
-    ToolResult,
 )
 from core.constants import AgentStatus
 
 
 # =============================================================================
-# Reducers — tell LangGraph how to merge state updates
+# Reducers
 # =============================================================================
 
 def _replace(existing: Any, new: Any) -> Any:
-    """Replace the existing value entirely (for single-value fields)."""
+    """Replace the existing value entirely."""
     return new
 
 
 def _append(existing: list | None, new: list | None) -> list:
-    """Append new items to the existing list (for log/history fields)."""
+    """Append new items to the existing list."""
     if existing is None:
         existing = []
     if new is None:
@@ -43,36 +39,29 @@ def _append(existing: list | None, new: list | None) -> list:
 
 
 # =============================================================================
-# AgentState — the central memory of the agent
+# AgentState
 # =============================================================================
 
 class AgentState(TypedDict, total=False):
     """
-    Central state object for the agent graph.
+    Central state object for the stock forecast agent graph.
     
-    This state flows through all nodes. Each node receives the FULL state,
-    and returns a DICTIONARY with only the fields it wants to update.
-    
-    Fields marked with `Annotated[..., _append]` are lists that grow over time.
-    Fields marked with `Annotated[..., _replace]` are overwritten each time.
-    
-    Visual diagram of the state lifecycle:
-    
+    Lifecycle:
         [START]
            │
-           ▼  question, audio_path, max_steps, temp_dir  (set once)
+           ▼  query (set once)
         ┌─────────────────────────────────────────────────────────┐
-        │  question_oriented_prompt  ← initial_prompt_node        │
-        │  initial_frontend_output   ← frontend_evidence_node     │
-        │  initial_plan              ← initial_plan_node          │
-        │  current_decision          ← planner_decision_node      │
-        │  latest_tool_result        ← tool_executor_node         │
-        │  evidence_log (growing)    ← evidence_fusion_node       │
-        │  tool_call_history (growing) ← tool_executor_node       │
-        │  planner_trace (growing)   ← planner_decision_node      │
-        │  evidence_summary          ← evidence_summarization_node│
+        │  user_intent               ← intent_clarification_node  │
+        │  market_structure          ← market_structure_node      │
+        │  sector_route              ← sector_router_node         │
+        │  technical_evidence        ← technical_analysis_node    │
+        │  fundamental_evidence      ← fundamental_analysis_node  │
+        │  capital_evidence          ← capital_analysis_node      │
+        │  sentiment_evidence        ← sentiment_analysis_node    │
+        │  composite_assessment      ← cross_sector_fusion_node   │
+        │  strategy_decision         ← strategy_generation_node   │
         │  final_answer              ← final_answer_node          │
-        │  step_count (increments)   ← evidence_fusion_node       │
+        │  evidence_log (growing)    ← all factor nodes           │
         │  status                    ← various nodes              │
         └─────────────────────────────────────────────────────────┘
            │
@@ -80,40 +69,35 @@ class AgentState(TypedDict, total=False):
          [END]
     """
     
-    # ===== Inputs (set once at start, never change) =====
-    question: str
-    audio_path: str
-    temp_dir: str
-    max_steps: int
+    # ===== Input (set once at start) =====
+    query: str
     config: dict[str, Any] | None
     
-    # ===== Set by initial_prompt_node =====
-    question_oriented_prompt: str | None
+    # ===== Phase 1: Intent & Market Structure =====
+    user_intent: Annotated[UserIntent | None, _replace]
+    market_structure: Annotated[MarketStructure | None, _replace]
     
-    # ===== Set by frontend_evidence_node =====
-    initial_frontend_output: Annotated[FrontendOutput | None, _replace]
+    # ===== Phase 2: Sector Routing =====
+    sector_route: Annotated[SectorRoute | None, _replace]
     
-    # ===== Set by initial_plan_node =====
-    initial_plan: Annotated[InitialPlan | None, _replace]
+    # ===== Phase 3: Factor Evidence (one per sector) =====
+    technical_evidence: Annotated[FactorEvidence | None, _replace]
+    fundamental_evidence: Annotated[FactorEvidence | None, _replace]
+    capital_evidence: Annotated[FactorEvidence | None, _replace]
+    sentiment_evidence: Annotated[FactorEvidence | None, _replace]
     
-    # ===== Growing logs (accumulate over the loop) =====
+    # ===== Phase 4: Fusion & Strategy =====
+    composite_assessment: Annotated[CompositeAssessment | None, _replace]
+    strategy_decision: Annotated[StrategyDecision | None, _replace]
+    
+    # ===== Growing logs =====
     evidence_log: Annotated[list[EvidenceItem], _append]
-    tool_call_history: Annotated[list[ToolCallRecord], _append]
-    planner_trace: Annotated[list[PlannerDecision], _append]
-    
-    # ===== Current cycle state (overwritten each iteration) =====
-    current_decision: Annotated[PlannerDecision | None, _replace]
-    latest_tool_result: Annotated[ToolResult | None, _replace]
-    
-    # ===== Set by evidence_summarization_node =====
-    evidence_summary: str | None
     
     # ===== Final outputs =====
     final_answer: Annotated[FinalAnswer | None, _replace]
     error_message: Annotated[str | None, _replace]
     
-    # ===== Counters and status =====
-    step_count: int
+    # ===== Status =====
     status: AgentStatus
 
 
@@ -122,53 +106,41 @@ class AgentState(TypedDict, total=False):
 # =============================================================================
 
 def create_initial_state(
-    question: str,
-    audio_path: str,
-    max_steps: int = 10,
-    temp_dir: str | None = None,
+    query: str,
     config: dict[str, Any] | None = None,
 ) -> AgentState:
     """
     Create a valid initial agent state.
     
-    This is called once at the very beginning, before the graph starts running.
-    It sets up all the "empty" fields so nodes can safely read them.
-    
     Args:
-        question: The user's question about the audio
-        audio_path: Path to the audio file
-        max_steps: Maximum steps before forcing termination
-        temp_dir: Temporary directory for generated files
+        query: The user's natural language query about a stock
         config: Optional configuration dict
     
     Returns:
         A properly initialized AgentState with all fields set
     """
-    if not question or not question.strip():
-        raise ValueError("question must be a non-empty string")
-    if not audio_path or not audio_path.strip():
-        raise ValueError("audio_path must be a non-empty string")
-    if max_steps < 1:
-        raise ValueError("max_steps must be at least 1")
+    if not query or not query.strip():
+        raise ValueError("query must be a non-empty string")
     
     return AgentState(
-        question=question.strip(),
-        audio_path=audio_path.strip(),
-        temp_dir=temp_dir or "",
-        max_steps=max_steps,
+        query=query.strip(),
         config=config,
-        # Everything else starts empty
-        question_oriented_prompt=None,
-        initial_frontend_output=None,
-        initial_plan=None,
+        # Phase 1
+        user_intent=None,
+        market_structure=None,
+        # Phase 2
+        sector_route=None,
+        # Phase 3
+        technical_evidence=None,
+        fundamental_evidence=None,
+        capital_evidence=None,
+        sentiment_evidence=None,
+        # Phase 4
+        composite_assessment=None,
+        strategy_decision=None,
+        # Logs & output
         evidence_log=[],
-        tool_call_history=[],
-        planner_trace=[],
-        current_decision=None,
-        latest_tool_result=None,
-        evidence_summary=None,
         final_answer=None,
         error_message=None,
-        step_count=0,
         status=AgentStatus.RUNNING,
     )

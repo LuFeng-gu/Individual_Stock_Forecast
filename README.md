@@ -48,7 +48,7 @@ END
 | market_structure | akshare 个股信息 + K线 + 热点板块 | 判断股票在当前市场主线中的位置 |
 | sector_router | 用户意图 + 市场结构 | 决策分析哪些因子（可跳过不相关因子） |
 | technical_analysis | akshare 历史K线 + 代码计算MA | 定性判断技术形态和趋势 |
-| fundamental_analysis | akshare 个股信息 + 实时估值(PE/PB) | 评估估值水平和基本面质量 |
+| fundamental_analysis | akshare 财务分析指标 + 个股信息 + 实时估值(PE/PB) | 基于 Python 计算的财报指标做定性解读 |
 | capital_analysis | akshare 个股资金流向 | 判断主力资金态度 |
 | sentiment_analysis | akshare 个股新闻 + 热点板块 | 评估市场情绪和舆论氛围 |
 | cross_sector_fusion | 四因子 Evidence | 加权综合评分，统一投资判断 |

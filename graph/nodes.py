@@ -118,6 +118,360 @@ def _fetch_valuation(stock_code: str) -> dict:
         return {}
 
 
+def _to_float(value) -> float | None:
+    """Convert common akshare values to float, returning None for missing values."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text or text in {"-", "--", "N/A", "nan", "None"}:
+        return None
+    multiplier = 1.0
+    if text.endswith("%"):
+        text = text[:-1]
+        multiplier = 0.01
+    text = text.replace(",", "")
+    try:
+        return float(text) * multiplier
+    except ValueError:
+        return None
+
+
+def _safe_div(numerator, denominator) -> float | None:
+    """Safely divide two numeric-like values."""
+    num = _to_float(numerator)
+    den = _to_float(denominator)
+    if num is None or den is None or den == 0:
+        return None
+    return num / den
+
+
+def _first_available(data: dict, *keys: str):
+    """Return the first non-empty value for any of the candidate keys."""
+    for key in keys:
+        if key in data:
+            value = data.get(key)
+            if _to_float(value) is not None:
+                return value
+    return None
+
+
+def _score_fundamental_metrics(metrics: dict) -> int:
+    """Create a conservative transparent score hint from computed metrics."""
+    score = 50
+
+    roe = metrics.get("roe")
+    if roe is not None:
+        score += 10 if roe >= 0.15 else 5 if roe >= 0.08 else -5
+
+    gross_margin = metrics.get("gross_margin")
+    if gross_margin is not None:
+        score += 5 if gross_margin >= 0.30 else -3 if gross_margin < 0.10 else 0
+
+    net_margin = metrics.get("net_margin")
+    if net_margin is not None:
+        score += 5 if net_margin >= 0.10 else -3 if net_margin < 0.03 else 0
+
+    revenue_yoy = metrics.get("revenue_yoy")
+    if revenue_yoy is not None:
+        score += 6 if revenue_yoy >= 0.10 else -6 if revenue_yoy < -0.05 else 0
+
+    net_profit_yoy = metrics.get("net_profit_yoy")
+    if net_profit_yoy is not None:
+        score += 6 if net_profit_yoy >= 0.10 else -8 if net_profit_yoy < -0.10 else 0
+
+    pe = metrics.get("pe")
+    if pe is not None:
+        score += 5 if 0 < pe <= 30 else -6 if pe > 60 or pe <= 0 else 0
+
+    pb = metrics.get("pb")
+    if pb is not None:
+        score += 3 if 0 < pb <= 5 else -4 if pb > 10 or pb <= 0 else 0
+
+    debt_to_asset = metrics.get("debt_to_asset")
+    if debt_to_asset is not None:
+        score += 5 if debt_to_asset <= 0.50 else -8 if debt_to_asset >= 0.75 else 0
+
+    ocf_to_net_profit = metrics.get("ocf_to_net_profit")
+    if ocf_to_net_profit is not None:
+        score += 5 if ocf_to_net_profit >= 1 else -6 if ocf_to_net_profit < 0.5 else 0
+
+    missing_count = len(metrics.get("missing_fields", []))
+    score -= min(missing_count * 2, 12)
+    return max(0, min(100, int(round(score))))
+
+
+def _calculate_fundamental_metrics(reports: dict, valuation: dict, basic: dict) -> dict:
+    """Calculate course-display fundamental metrics from statements and fallbacks."""
+    current = reports.get("current", {}) or {}
+    previous = reports.get("previous", {}) or {}
+
+    revenue = _first_available(current, "营业收入", "营业总收入")
+    operating_cost = _first_available(current, "营业成本", "营业总成本")
+    net_profit = _first_available(current, "净利润")
+    parent_net_profit = _first_available(current, "归母净利润", "归属于母公司所有者的净利润")
+    total_assets = _first_available(current, "总资产", "资产总计")
+    total_liabilities = _first_available(current, "总负债", "负债合计")
+    parent_equity = _first_available(current, "归母净资产", "归属于母公司股东权益合计", "所有者权益合计")
+    operating_cash_flow = _first_available(current, "经营现金流净额", "经营活动产生的现金流量净额")
+
+    previous_revenue = _first_available(previous, "营业收入", "营业总收入")
+    previous_net_profit = _first_available(previous, "净利润")
+    previous_parent_equity = _first_available(previous, "归母净资产", "归属于母公司股东权益合计", "所有者权益合计")
+
+    total_market_value = _to_float(valuation.get("总市值"))
+    parent_net_profit_float = _to_float(parent_net_profit)
+    parent_equity_float = _to_float(parent_equity)
+    previous_parent_equity_float = _to_float(previous_parent_equity)
+
+    average_parent_equity = None
+    if parent_equity_float is not None and previous_parent_equity_float is not None:
+        average_parent_equity = (parent_equity_float + previous_parent_equity_float) / 2
+
+    pe = _safe_div(total_market_value, parent_net_profit_float)
+    if pe is None:
+        pe = _to_float(valuation.get("PE_DYNAMIC"))
+
+    pb = _safe_div(total_market_value, parent_equity_float)
+    if pb is None:
+        pb = _to_float(valuation.get("PB"))
+
+    gross_margin = None
+    if _to_float(revenue) is not None and _to_float(operating_cost) is not None:
+        gross_margin = _safe_div(_to_float(revenue) - _to_float(operating_cost), revenue)
+
+    metrics = {
+        "industry": basic.get("行业", "未知"),
+        "pe": pe,
+        "pb": pb,
+        "roe": _safe_div(parent_net_profit_float, average_parent_equity),
+        "gross_margin": gross_margin,
+        "net_margin": _safe_div(net_profit, revenue),
+        "revenue_yoy": _safe_div(_to_float(revenue) - _to_float(previous_revenue), previous_revenue)
+        if _to_float(revenue) is not None and _to_float(previous_revenue) is not None
+        else None,
+        "net_profit_yoy": _safe_div(_to_float(net_profit) - _to_float(previous_net_profit), previous_net_profit)
+        if _to_float(net_profit) is not None and _to_float(previous_net_profit) is not None
+        else None,
+        "debt_to_asset": _safe_div(total_liabilities, total_assets),
+        "ocf_to_net_profit": _safe_div(operating_cash_flow, net_profit),
+        "data_sources": reports.get("data_sources", ["利润表", "资产负债表", "现金流量表", "行情数据"]),
+    }
+
+    labels = {
+        "pe": "PE",
+        "pb": "PB",
+        "roe": "ROE",
+        "gross_margin": "毛利率",
+        "net_margin": "净利率",
+        "revenue_yoy": "营收同比",
+        "net_profit_yoy": "净利润同比",
+        "debt_to_asset": "资产负债率",
+        "ocf_to_net_profit": "经营现金流/净利润",
+    }
+    metrics["missing_fields"] = [label for key, label in labels.items() if metrics.get(key) is None]
+    metrics["score_hint"] = _score_fundamental_metrics(metrics)
+    return metrics
+
+
+def _format_ratio(value) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value * 100:.2f}%"
+
+
+def _format_number(value) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value:.2f}"
+
+
+def _format_fundamental_metrics(metrics: dict) -> str:
+    """Format fundamental metrics for the LLM prompt."""
+    missing = metrics.get("missing_fields", [])
+    sources = metrics.get("data_sources", [])
+    return (
+        "【估值】\n"
+        f"PE: {_format_number(metrics.get('pe'))}\n"
+        f"PB: {_format_number(metrics.get('pb'))}\n\n"
+        "【盈利能力】\n"
+        f"ROE: {_format_ratio(metrics.get('roe'))}\n"
+        f"毛利率: {_format_ratio(metrics.get('gross_margin'))}\n"
+        f"净利率: {_format_ratio(metrics.get('net_margin'))}\n\n"
+        "【成长性】\n"
+        f"营收同比: {_format_ratio(metrics.get('revenue_yoy'))}\n"
+        f"净利润同比: {_format_ratio(metrics.get('net_profit_yoy'))}\n\n"
+        "【财务安全】\n"
+        f"资产负债率: {_format_ratio(metrics.get('debt_to_asset'))}\n\n"
+        "【现金流质量】\n"
+        f"经营现金流/净利润: {_format_number(metrics.get('ocf_to_net_profit'))}\n\n"
+        "【数据质量】\n"
+        f"缺失字段: {', '.join(missing) if missing else '无'}\n"
+        f"数据来源: {', '.join(sources) if sources else '未知'}\n"
+        f"Python预评分: {metrics.get('score_hint', 50)}/100"
+    )
+
+
+def _to_em_statement_code(stock_code: str) -> str:
+    """6 位 A 股代码 -> 东财三表接口格式（如 SH600519）。"""
+    c = (stock_code or "").strip()
+    if len(c) != 6 or not c.isdigit():
+        return ""
+    if c.startswith("6"):
+        return f"SH{c}"
+    if c.startswith(("0", "3")):
+        return f"SZ{c}"
+    if c.startswith(("8", "4")):
+        return f"BJ{c}"
+    return ""
+
+
+def _extract_statement_rows(df, date_col_candidates: tuple[str, ...]) -> tuple[dict, dict]:
+    """从三表 DataFrame 提取最近两期行，返回 (current_row_dict, previous_row_dict)。"""
+    if df is None or df.empty:
+        return {}, {}
+    sort_col = next((c for c in date_col_candidates if c in df.columns), None)
+    if sort_col:
+        df = df.sort_values(sort_col, ascending=False, ignore_index=True)
+    current = dict(df.iloc[0]) if len(df) >= 1 else {}
+    previous = dict(df.iloc[1]) if len(df) >= 2 else {}
+    return current, previous
+
+
+def _pick(row: dict, *keys: str):
+    """从 row 中按候选键顺序取第一个非空值。"""
+    for k in keys:
+        v = row.get(k)
+        if v is not None and v == v:  # not NaN
+            try:
+                if str(v).strip():
+                    return v
+            except Exception:
+                return v
+    return None
+
+
+def _row_to_metric_dict(row) -> dict:
+    """Convert a dataframe row to a normalized dict with only useful scalar values."""
+    if row is None:
+        return {}
+    result = {}
+    for key, value in row.items():
+        if key in {"股票代码", "股票简称", "报告期", "公告日期", "报告类型"}:
+            continue
+        result[str(key)] = value
+    return result
+
+
+def _fetch_financial_reports(stock_code: str) -> dict:
+    """
+    Fetch recent financial statement data from akshare.
+
+    使用东方财富资产负债表、利润表、现金流量表获取绝对值指标；
+    辅以新浪财经财务指标补充比率数据。
+    """
+    reports: dict = {
+        "current": {},
+        "previous": {},
+        "data_sources": ["行情数据"],
+    }
+    sources: list[str] = []
+
+    try:
+        import akshare as ak
+    except ImportError:
+        return reports
+
+    stmt_code = _to_em_statement_code(stock_code)
+    date_cols = ("REPORT_DATE", "REPORTDATE", "报告期")
+
+    # 1) 资产负债表 -> 总资产、总负债、归母净资产
+    if stmt_code:
+        try:
+            df = ak.stock_balance_sheet_by_report_em(symbol=stmt_code)
+            cur, prev = _extract_statement_rows(df, date_cols)
+            if cur:
+                def _merge_balance(dest: dict, row: dict) -> None:
+                    v = _pick(row, "TOTAL_ASSETS", "TOTALASSETS")
+                    if v is not None:
+                        dest["总资产"] = v
+                    v = _pick(row, "TOTAL_LIABILITIES", "TOTALLIABILITIES", "TOTAL_LIAB")
+                    if v is not None:
+                        dest["总负债"] = v
+                    v = _pick(row, "TOTAL_PARENT_EQUITY", "PARENT_EQUITY", "HOLDER_EQUITY")
+                    if v is not None:
+                        dest["归母净资产"] = v
+
+                _merge_balance(reports["current"], cur)
+                _merge_balance(reports["previous"], prev)
+                sources.append("资产负债表")
+        except Exception as e:
+            log_error("fundamental_balance_em", RuntimeError(f"Balance sheet: {e}"))
+
+    # 2) 利润表 -> 营业收入、营业成本、净利润、归母净利润
+    if stmt_code:
+        try:
+            df = ak.stock_profit_sheet_by_report_em(symbol=stmt_code)
+            cur, prev = _extract_statement_rows(df, date_cols)
+            if cur:
+                def _merge_profit(dest: dict, row: dict) -> None:
+                    v = _pick(row, "TOTAL_OPERATE_INCOME", "OPERATE_INCOME", "OPERATING_INCOME")
+                    if v is not None:
+                        dest["营业收入"] = v
+                    v = _pick(row, "OPERATE_COST", "TOTAL_OPERATE_COST")
+                    if v is not None:
+                        dest["营业成本"] = v
+                    v = _pick(row, "NETPROFIT", "NET_PROFIT")
+                    if v is not None:
+                        dest["净利润"] = v
+                    v = _pick(row, "PARENT_NETPROFIT", "HOLDER_NETPROFIT")
+                    if v is not None:
+                        dest["归母净利润"] = v
+
+                _merge_profit(reports["current"], cur)
+                _merge_profit(reports["previous"], prev)
+                sources.append("利润表")
+        except Exception as e:
+            log_error("fundamental_profit_em", RuntimeError(f"Profit sheet: {e}"))
+
+    # 3) 现金流量表 -> 经营现金流净额
+    if stmt_code:
+        try:
+            df = ak.stock_cash_flow_sheet_by_report_em(symbol=stmt_code)
+            cur, prev = _extract_statement_rows(df, date_cols)
+            if cur:
+                def _merge_cashflow(dest: dict, row: dict) -> None:
+                    v = _pick(row, "NETCASH_OPERATE", "NETCASH_FLOWS_OPERATING", "OPERATE_NET_CASH_FLOW")
+                    if v is not None:
+                        dest["经营现金流净额"] = v
+
+                _merge_cashflow(reports["current"], cur)
+                _merge_cashflow(reports["previous"], prev)
+                sources.append("现金流量表")
+        except Exception as e:
+            log_error("fundamental_cashflow_em", RuntimeError(f"Cash flow sheet: {e}"))
+
+    # 4) 新浪财经：财务指标（比率等），用 setdefault 补缺
+    try:
+        indicator_df = ak.stock_financial_analysis_indicator(symbol=stock_code)
+        if indicator_df is not None and not indicator_df.empty:
+            recent = indicator_df.head(2)
+            if len(recent) >= 1:
+                for k, v in _row_to_metric_dict(recent.iloc[0]).items():
+                    reports["current"].setdefault(k, v)
+            if len(recent) >= 2:
+                for k, v in _row_to_metric_dict(recent.iloc[1]).items():
+                    reports["previous"].setdefault(k, v)
+            sources.append("新浪财经财务指标")
+    except Exception as e:
+        log_error("fundamental_reports_sina", RuntimeError(f"Sina financial indicators: {e}"))
+
+    if sources:
+        reports["data_sources"] = sources + ["行情数据"]
+    return reports
+
+
 def _fetch_capital_flow(stock_code: str, days: int = 5) -> list[dict]:
     """Fetch recent capital flow data."""
     try:
@@ -428,20 +782,13 @@ def fundamental_analysis_node(state: AgentState, planner: BasePlanner) -> dict:
 
     basic = _fetch_stock_basic(stock_code)
     valuation = _fetch_valuation(stock_code)
+    if "总市值" not in valuation and basic.get("总市值") is not None:
+        valuation["总市值"] = basic.get("总市值")
 
-    industry = basic.get("行业", "未知")
-    pe_dynamic = valuation.get("PE_DYNAMIC", "N/A")
-    pb = valuation.get("PB", "N/A")
-    turnover = valuation.get("换手率", "N/A")
-    total_market = basic.get("总市值", "N/A")
-
-    fundamental_text = (
-        f"行业: {industry}\n"
-        f"总市值: {total_market}\n"
-        f"PE(动态): {pe_dynamic}\n"
-        f"PB: {pb}\n"
-        f"换手率: {turnover}%\n"
-    )
+    reports = _fetch_financial_reports(stock_code)
+    metrics = _calculate_fundamental_metrics(reports, valuation, basic)
+    industry = metrics.get("industry", basic.get("行业", "未知"))
+    fundamental_text = _format_fundamental_metrics(metrics)
 
     system_prompt = _load_prompt("fundamental_system")
     user_prompt = _load_prompt("fundamental_user").format(

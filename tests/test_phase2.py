@@ -8,7 +8,8 @@ Tests the complete flow including:
 Uses a mock planner to avoid requiring a real API key.
 
 Usage:
-    conda activate stock-forecast-agent
+    conda activate stock-fundamental-agent   # 或你本地的课程环境
+    pip install -r requirements.txt          # 含 akshare，便于拉取真实数据
     python tests/test_phase2.py
 """
 
@@ -119,6 +120,177 @@ class MockPlanner(BasePlanner):
             return """{"stock_name": "贵州茅台", "stock_code": "600519", "intent_type": "analysis", "time_horizon": "medium", "risk_preference": "moderate", "clarified_query": "全面分析贵州茅台的投资价值"}"""
 
         return "{}"
+
+
+def test_fundamental_metric_calculation_complete_data():
+    """Test financial statement based fundamental metric calculation."""
+    from graph.nodes import _calculate_fundamental_metrics
+
+    reports = {
+        "current": {
+            "营业收入": 1000.0,
+            "营业成本": 600.0,
+            "净利润": 180.0,
+            "归母净利润": 160.0,
+            "总资产": 3000.0,
+            "总负债": 1200.0,
+            "归母净资产": 1500.0,
+            "经营现金流净额": 220.0,
+        },
+        "previous": {
+            "营业收入": 800.0,
+            "净利润": 120.0,
+            "归母净资产": 1300.0,
+        },
+    }
+    valuation = {"总市值": 3200.0, "PE_DYNAMIC": 21.0, "PB": 2.2}
+    basic = {"行业": "测试行业"}
+
+    metrics = _calculate_fundamental_metrics(reports, valuation, basic)
+
+    assert metrics["industry"] == "测试行业"
+    assert metrics["pe"] == 20.0
+    assert round(metrics["pb"], 4) == 2.1333
+    assert round(metrics["roe"], 4) == 0.1143
+    assert metrics["gross_margin"] == 0.4
+    assert metrics["net_margin"] == 0.18
+    assert metrics["revenue_yoy"] == 0.25
+    assert metrics["net_profit_yoy"] == 0.5
+    assert metrics["debt_to_asset"] == 0.4
+    assert round(metrics["ocf_to_net_profit"], 4) == 1.2222
+    assert metrics["missing_fields"] == []
+
+
+def test_fundamental_metric_calculation_missing_data_uses_fallbacks():
+    """Test missing statement fields do not crash and valuation fallbacks remain available."""
+    from graph.nodes import _calculate_fundamental_metrics
+
+    reports = {
+        "current": {
+            "营业收入": 0.0,
+            "营业成本": None,
+            "净利润": None,
+            "归母净利润": None,
+            "总资产": None,
+            "总负债": None,
+            "归母净资产": None,
+            "经营现金流净额": None,
+        },
+        "previous": {},
+    }
+    valuation = {"总市值": 3200.0, "PE_DYNAMIC": 21.0, "PB": 2.2}
+    basic = {"行业": "测试行业"}
+
+    metrics = _calculate_fundamental_metrics(reports, valuation, basic)
+
+    assert metrics["pe"] == 21.0
+    assert metrics["pb"] == 2.2
+    assert metrics["roe"] is None
+    assert metrics["gross_margin"] is None
+    assert metrics["net_margin"] is None
+    assert metrics["revenue_yoy"] is None
+    assert metrics["net_profit_yoy"] is None
+    assert metrics["debt_to_asset"] is None
+    assert metrics["ocf_to_net_profit"] is None
+    assert "ROE" in metrics["missing_fields"]
+    assert "毛利率" in metrics["missing_fields"]
+    assert "净利率" in metrics["missing_fields"]
+    assert "营收同比" in metrics["missing_fields"]
+    assert "净利润同比" in metrics["missing_fields"]
+    assert "资产负债率" in metrics["missing_fields"]
+    assert "经营现金流/净利润" in metrics["missing_fields"]
+
+
+def test_fundamental_metric_formatting_sections():
+    """Test LLM prompt text contains all required fundamental sections."""
+    from graph.nodes import _format_fundamental_metrics
+
+    metrics = {
+        "industry": "测试行业",
+        "pe": 20.0,
+        "pb": 2.13,
+        "roe": 0.1143,
+        "gross_margin": 0.4,
+        "net_margin": 0.18,
+        "revenue_yoy": 0.25,
+        "net_profit_yoy": 0.5,
+        "debt_to_asset": 0.4,
+        "ocf_to_net_profit": 1.2222,
+        "score_hint": 75,
+        "missing_fields": [],
+        "data_sources": ["利润表", "资产负债表", "现金流量表", "行情数据"],
+    }
+
+    text = _format_fundamental_metrics(metrics)
+
+    assert "【估值】" in text
+    assert "PE: 20.00" in text
+    assert "PB: 2.13" in text
+    assert "【盈利能力】" in text
+    assert "ROE: 11.43%" in text
+    assert "毛利率: 40.00%" in text
+    assert "净利率: 18.00%" in text
+    assert "【成长性】" in text
+    assert "营收同比: 25.00%" in text
+    assert "净利润同比: 50.00%" in text
+    assert "【财务安全】" in text
+    assert "资产负债率: 40.00%" in text
+    assert "【现金流质量】" in text
+    assert "经营现金流/净利润: 1.22" in text
+    assert "【数据质量】" in text
+    assert "缺失字段: 无" in text
+    assert "Python预评分: 75/100" in text
+
+
+def test_fundamental_report_fetch_shape():
+    """Test financial report fetch helper returns the expected stable shape."""
+    from graph.nodes import _fetch_financial_reports
+
+    reports = _fetch_financial_reports("600519")
+
+    assert "current" in reports
+    assert "previous" in reports
+    assert "data_sources" in reports
+    assert isinstance(reports["current"], dict)
+    assert isinstance(reports["previous"], dict)
+    assert isinstance(reports["data_sources"], list)
+
+
+def test_fundamental_node_uses_structured_metric_prompt():
+    """Test fundamental node sends grouped structured metrics to the planner."""
+    from graph.nodes import fundamental_analysis_node
+
+    class CapturingPlanner(MockPlanner):
+        def __init__(self):
+            self.user_prompt = ""
+
+        def generate(self, system_prompt: str, user_prompt: str) -> str:
+            self.user_prompt = user_prompt
+            return """{
+                "factor_name": "fundamental",
+                "trend_signal": "Neutral",
+                "score": 60,
+                "key_findings": ["基本面指标已结构化"],
+                "risk_flags": [],
+                "raw_data_summary": "已读取基本面结构化数据"
+            }"""
+
+    state = create_initial_state(query="分析贵州茅台")
+    state["user_intent"] = UserIntent(stock_name="贵州茅台", stock_code="600519")
+    state["sector_route"] = SectorRoute(sectors=["fundamental"], analysis_focus="基本面分析")
+    planner = CapturingPlanner()
+
+    result = fundamental_analysis_node(state, planner)
+
+    evidence = result["fundamental_evidence"]
+    assert evidence.factor_name == "fundamental"
+    assert evidence.score == 60
+    assert "【估值】" in planner.user_prompt
+    assert "【盈利能力】" in planner.user_prompt
+    assert "【成长性】" in planner.user_prompt
+    assert "【财务安全】" in planner.user_prompt
+    assert "【现金流质量】" in planner.user_prompt
+    assert "【数据质量】" in planner.user_prompt
 
 
 def test_phase2_full_flow():
@@ -294,6 +466,11 @@ def test_akshare_phase2_data():
 
 if __name__ == "__main__":
     try:
+        test_fundamental_metric_calculation_complete_data()
+        test_fundamental_metric_calculation_missing_data_uses_fallbacks()
+        test_fundamental_metric_formatting_sections()
+        test_fundamental_report_fetch_shape()
+        test_fundamental_node_uses_structured_metric_prompt()
         test_akshare_phase2_data()
         test_phase2_full_flow()
         test_sector_routing_skip()

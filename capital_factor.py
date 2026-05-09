@@ -884,7 +884,7 @@ def build_capital_evidence(
 def analyze_capital_factor(
     stock_name: str,
     stock_code: str,
-    use_rank: bool = True,
+    use_rank: bool = False,
     use_margin: bool = True,
 ) -> tuple[dict[str, Any], FactorEvidence]:
     """

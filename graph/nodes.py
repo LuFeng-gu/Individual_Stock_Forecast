@@ -26,7 +26,6 @@ from planner.base import BasePlanner
 
 from capital_factor import (
     fetch_capital_flow,
-    fetch_fund_flow_rank,
     fetch_margin_data,
     calculate_capital_indicators,
     build_capital_prompt_data,
@@ -733,7 +732,8 @@ def capital_analysis_node(state: AgentState, planner: BasePlanner) -> dict:
     try:
         # 1. AkShare 数据获取
         flow_df = fetch_capital_flow(str(stock_code))
-        rank_df = fetch_fund_flow_rank(str(stock_code), indicator="5日")
+        #rank_df = fetch_fund_flow_rank(str(stock_code), indicator="5日")
+        rank_df = pd.DataFrame()
         margin_df = fetch_margin_data(str(stock_code))
 
         # 2. 资金指标计算
@@ -753,14 +753,23 @@ def capital_analysis_node(state: AgentState, planner: BasePlanner) -> dict:
             system_prompt = "你是资金因子分析助手。只能基于给定结构化数据解释，不得编造不存在的数据。"
 
         if user_template:
+            capital_data_json = json.dumps(
+                capital_prompt_data,
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+
             user_prompt = _render_capital_user_prompt(
                 user_template,
                 stock_name=stock_name,
                 stock_code=stock_code,
+                stock=f"{stock_name} ({stock_code})",
                 user_intent=user_intent,
                 time_horizon=time_horizon,
                 market_structure=market_structure,
-                capital_indicators=capital_prompt_data,
+                capital_data=capital_data_json,
+                capital_indicators=capital_data_json,
             )
         else:
             user_prompt = f"""

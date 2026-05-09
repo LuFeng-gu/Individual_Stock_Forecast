@@ -91,7 +91,11 @@ def _fetch_recent_kline(stock_code: str, days: int = 10) -> list[dict]:
         if df.empty:
             return []
         recent = df.tail(days)
-        return recent[["日期", "收盘", "涨跌幅", "成交量"]].to_dict("records")
+        # Tech factor extension: keep turnover amount so volume/amount signals can be measured.
+        columns = ["日期", "收盘", "涨跌幅", "成交量"]
+        if "成交额" in recent.columns:
+            columns.append("成交额")
+        return recent[columns].to_dict("records")
     except Exception as e:
         return []
 
@@ -165,6 +169,156 @@ def _calculate_ma(kline: list[dict]) -> dict:
         "MA20": sum(closes[-20:]) / 20 if len(closes) >= 20 else None,
         "MA60": sum(closes[-60:]) / 60 if len(closes) >= 60 else None,
     }
+
+
+# Tech factor extension: objective indicator layer for trend, momentum, reversal,
+# volume, risk, and breakout signals before the LLM makes a structured judgment.
+def _safe_float(value, default: float = 0.0) -> float:
+    """Convert akshare/numpy values to float safely for indicator calculations."""
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _pct_change(current: float, previous: float | None) -> float | None:
+    """Return percentage change, guarding against missing or zero denominators."""
+    if previous is None or previous == 0:
+        return None
+    return (current / previous - 1) * 100
+
+
+def _max_drawdown(values: list[float]) -> float | None:
+    """Calculate max drawdown in percent over a price series."""
+    if not values:
+        return None
+    peak = values[0]
+    max_dd = 0.0
+    for value in values:
+        peak = max(peak, value)
+        if peak:
+            max_dd = min(max_dd, value / peak - 1)
+    return max_dd * 100
+
+
+def _calculate_rsi(closes: list[float], period: int = 14) -> float | None:
+    """Calculate simple RSI for the tech reversal factor."""
+    if len(closes) <= period:
+        return None
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    recent = deltas[-period:]
+    gains = [max(delta, 0) for delta in recent]
+    losses = [abs(min(delta, 0)) for delta in recent]
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    if avg_gain == 0 and avg_loss == 0:
+        return 50.0
+    if avg_loss == 0:
+        return 100.0
+    return 100 - (100 / (1 + avg_gain / avg_loss))
+
+
+def _annualized_volatility(closes: list[float], period: int = 20) -> float | None:
+    """Calculate annualized volatility from daily returns."""
+    if len(closes) <= period:
+        return None
+    returns = []
+    recent = closes[-(period + 1):]
+    for i in range(1, len(recent)):
+        prev = recent[i - 1]
+        if prev:
+            returns.append(recent[i] / prev - 1)
+    if len(returns) < 2:
+        return None
+    mean = sum(returns) / len(returns)
+    variance = sum((ret - mean) ** 2 for ret in returns) / (len(returns) - 1)
+    return (variance ** 0.5) * (252 ** 0.5) * 100
+
+
+def _calculate_technical_indicators(kline: list[dict]) -> dict:
+    """Calculate the expanded tech factor set requested for technical analysis."""
+    if len(kline) < 5:
+        return {}
+
+    closes = [_safe_float(d.get("收盘")) for d in kline]
+    volumes = [_safe_float(d.get("成交量")) for d in kline]
+    amounts = [_safe_float(d.get("成交额")) for d in kline]
+    latest_close = closes[-1]
+    ma = _calculate_ma(kline)
+
+    def avg_last(values: list[float], period: int) -> float | None:
+        if len(values) < period:
+            return None
+        return sum(values[-period:]) / period
+
+    ma5 = ma.get("MA5")
+    ma20 = ma.get("MA20")
+    ma60 = ma.get("MA60")
+    high20 = max(closes[-20:]) if len(closes) >= 20 else None
+    high60 = max(closes[-60:]) if len(closes) >= 60 else None
+    avg_volume_5 = avg_last(volumes, 5)
+    avg_volume_20 = avg_last(volumes, 20)
+    avg_amount_5 = avg_last(amounts, 5)
+    prev_amount_5 = sum(amounts[-10:-5]) / 5 if len(amounts) >= 10 else None
+
+    return {
+        "latest_close": latest_close,
+        "MA5": ma5,
+        "MA20": ma20,
+        "MA60": ma60,
+        "close_vs_ma5": _pct_change(latest_close, ma5),
+        "close_vs_ma20": _pct_change(latest_close, ma20),
+        "close_vs_ma60": _pct_change(latest_close, ma60),
+        "return_5d": _pct_change(latest_close, closes[-6] if len(closes) >= 6 else None),
+        "return_20d": _pct_change(latest_close, closes[-21] if len(closes) >= 21 else None),
+        "return_60d": _pct_change(latest_close, closes[-61] if len(closes) >= 61 else None),
+        "RSI14": _calculate_rsi(closes, period=14),
+        "BIAS5": _pct_change(latest_close, ma5),
+        "BIAS20": _pct_change(latest_close, ma20),
+        "volume_ratio_5_20": (avg_volume_5 / avg_volume_20) if avg_volume_5 and avg_volume_20 else None,
+        "amount_change_5d": _pct_change(avg_amount_5, prev_amount_5),
+        "volatility_20d": _annualized_volatility(closes, period=20),
+        "max_drawdown_60d": _max_drawdown(closes[-60:]) if len(closes) >= 60 else None,
+        "is_20d_high": bool(high20 is not None and latest_close >= high20),
+        "is_60d_high": bool(high60 is not None and latest_close >= high60),
+        "distance_to_20d_high": _pct_change(latest_close, high20),
+        "distance_to_60d_high": _pct_change(latest_close, high60),
+    }
+
+
+def _format_technical_indicators(indicators: dict) -> str:
+    """Format expanded tech indicators by category for prompt injection."""
+    def fmt(value, suffix: str = "") -> str:
+        if value is None:
+            return "N/A"
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if isinstance(value, (int, float)):
+            return f"{value:.2f}{suffix}"
+        return str(value)
+
+    return "\n".join([
+        "Trend:",
+        f"- Latest close: {fmt(indicators.get('latest_close'))}",
+        f"- MA5 / MA20 / MA60: {fmt(indicators.get('MA5'))} / {fmt(indicators.get('MA20'))} / {fmt(indicators.get('MA60'))}",
+        f"- Close vs MA5 / MA20 / MA60: {fmt(indicators.get('close_vs_ma5'), '%')} / {fmt(indicators.get('close_vs_ma20'), '%')} / {fmt(indicators.get('close_vs_ma60'), '%')}",
+        "Momentum:",
+        f"- 5d / 20d / 60d return: {fmt(indicators.get('return_5d'), '%')} / {fmt(indicators.get('return_20d'), '%')} / {fmt(indicators.get('return_60d'), '%')}",
+        "Reversal:",
+        f"- RSI14: {fmt(indicators.get('RSI14'))}",
+        f"- BIAS5 / BIAS20: {fmt(indicators.get('BIAS5'), '%')} / {fmt(indicators.get('BIAS20'), '%')}",
+        "Volume:",
+        f"- 5d vs 20d volume ratio: {fmt(indicators.get('volume_ratio_5_20'))}",
+        f"- 5d average amount change: {fmt(indicators.get('amount_change_5d'), '%')}",
+        "Risk:",
+        f"- 20d annualized volatility: {fmt(indicators.get('volatility_20d'), '%')}",
+        f"- 60d max drawdown: {fmt(indicators.get('max_drawdown_60d'), '%')}",
+        "Breakout:",
+        f"- 20d high / 60d high: {fmt(indicators.get('is_20d_high'))} / {fmt(indicators.get('is_60d_high'))}",
+        f"- Distance to 20d / 60d high: {fmt(indicators.get('distance_to_20d_high'), '%')} / {fmt(indicators.get('distance_to_60d_high'), '%')}",
+    ])
 
 
 def _load_prompt(prompt_name: str) -> str:
@@ -378,18 +532,19 @@ def technical_analysis_node(state: AgentState, planner: BasePlanner) -> dict:
     stock_code = intent.stock_code if intent else ""
     stock_name = intent.stock_name if intent else ""
 
-    kline = _fetch_recent_kline(stock_code, days=20)
-    ma = _calculate_ma(kline)
+    # Tech factor extension: use a longer window so MA60, 60d return, drawdown, and highs are available.
+    kline = _fetch_recent_kline(stock_code, days=80)
+    indicators = _calculate_technical_indicators(kline)
 
     kline_text = "\n".join([f"  {d['日期']}: 收{d['收盘']} 涨跌{d['涨跌幅']}% 量{d['成交量']}" for d in kline[-10:]])
-    ma_text = f"MA5: {ma.get('MA5', 'N/A')}, MA20: {ma.get('MA20', 'N/A')}, MA60: {ma.get('MA60', 'N/A')}"
+    indicator_text = _format_technical_indicators(indicators)
 
     system_prompt = _load_prompt("technical_system")
     user_prompt = _load_prompt("technical_user").format(
         stock_name=stock_name,
         stock_code=stock_code,
         kline_summary=kline_text,
-        indicator_summary=ma_text,
+        indicator_summary=indicator_text,
     )
 
     try:

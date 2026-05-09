@@ -1,10 +1,11 @@
 Stock: {stock_name} ({stock_code})
 
-Technical Data:
+Recent K-line Data:
 
 {kline_summary}
 
-Indicator Summary:
+Expanded Technical Indicators:
+
 {indicator_summary}
 
-Analyze the technical picture and return the JSON structure.
+Analyze the technical picture across trend, momentum, reversal, volume, risk, and breakout factors. Return the JSON structure only.

@@ -207,27 +207,191 @@ def fetch_capital_flow(stock_code: str, days: int = 20) -> pd.DataFrame:
 
 def fetch_fund_flow_rank(stock_code: str, indicator: str = "5日") -> pd.DataFrame:
     """
-    获取个股资金流排名数据，可选增强项。
+    获取个股资金流排名数据。用 curl_cffi 直接调用东方财富 clist/get API，
+    多 CDN 节点轮询，逐页搜索目标股票，找到即返回。
     indicator: "今日" / "3日" / "5日" / "10日"
     """
-    if ak is None:
-        raise RuntimeError("akshare is not installed. Please run: pip install akshare")
+    import os
+    import time
+    import math
+
+    os.environ.setdefault("NO_PROXY", "*")
+
+    try:
+        from curl_cffi import requests as cr
+    except Exception:
+        return pd.DataFrame()
 
     code = str(stock_code).strip()[-6:]
 
-    try:
-        df = ak.stock_individual_fund_flow_rank(indicator=indicator)
-        if df is None or df.empty:
+    indicator_map = {
+        "今日": [
+            "f62",
+            "f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205,f124",
+            [
+                "排名", "代码", "名称", "最新价", "涨跌幅",
+                "主力净流入-净额", "主力净流入-净占比",
+                "超大单净流入-净额", "超大单净流入-净占比",
+                "大单净流入-净额", "大单净流入-净占比",
+                "中单净流入-净额", "中单净流入-净占比",
+                "小单净流入-净额", "小单净流入-净占比",
+            ],
+        ],
+        "3日": [
+            "f267",
+            "f12,f14,f2,f127,f267,f268,f269,f270,f271,f272,f273,f274,f275,f276,f257,f258,f124",
+            [
+                "排名", "代码", "名称", "最新价", "3日涨跌幅",
+                "3日主力净流入-净额", "3日主力净流入-净占比",
+                "3日超大单净流入-净额", "3日超大单净流入-净占比",
+                "3日大单净流入-净额", "3日大单净流入-净占比",
+                "3日中单净流入-净额", "3日中单净流入-净占比",
+                "3日小单净流入-净额", "3日小单净流入-净占比",
+            ],
+        ],
+        "5日": [
+            "f164",
+            "f12,f14,f2,f109,f164,f165,f166,f167,f168,f169,f170,f171,f172,f173,f257,f258,f124",
+            [
+                "排名", "代码", "名称", "最新价", "5日涨跌幅",
+                "5日主力净流入-净额", "5日主力净流入-净占比",
+                "5日超大单净流入-净额", "5日超大单净流入-净占比",
+                "5日大单净流入-净额", "5日大单净流入-净占比",
+                "5日中单净流入-净额", "5日中单净流入-净占比",
+                "5日小单净流入-净额", "5日小单净流入-净占比",
+            ],
+        ],
+        "10日": [
+            "f174",
+            "f12,f14,f2,f160,f174,f175,f176,f177,f178,f179,f180,f181,f182,f183,f260,f261,f124",
+            [
+                "排名", "代码", "名称", "最新价", "10日涨跌幅",
+                "10日主力净流入-净额", "10日主力净流入-净占比",
+                "10日超大单净流入-净额", "10日超大单净流入-净占比",
+                "10日大单净流入-净额", "10日大单净流入-净占比",
+                "10日中单净流入-净额", "10日中单净流入-净占比",
+                "10日小单净流入-净额", "10日小单净流入-净占比",
+            ],
+        ],
+    }
+
+    if indicator not in indicator_map:
+        indicator = "5日"
+
+    fid, fields, columns = indicator_map[indicator]
+    params = {
+        "fid": fid,
+        "po": "1",
+        "pz": "100",
+        "pn": "1",
+        "np": "1",
+        "fltt": "2",
+        "invt": "2",
+        "ut": "b2884a393a59ad64002292a3e90d46a5",
+        "fs": "m:0+t:6+f:!2,m:0+t:13+f:!2,m:0+t:80+f:!2,m:1+t:2+f:!2,m:1+t:23+f:!2,m:0+t:7+f:!2,m:1+t:3+f:!2",
+        "fields": fields,
+    }
+
+    domains = [
+        "push2.eastmoney.com",
+        "1.push2.eastmoney.com",
+        "11.push2.eastmoney.com",
+        "22.push2.eastmoney.com",
+        "33.push2.eastmoney.com",
+        "44.push2.eastmoney.com",
+        "55.push2.eastmoney.com",
+        "66.push2.eastmoney.com",
+        "77.push2.eastmoney.com",
+        "88.push2.eastmoney.com",
+        "99.push2.eastmoney.com",
+    ]
+
+    for domain in domains:
+        try:
+            url = f"https://{domain}/api/qt/clist/get"
+
+            # 获取第一页
+            r = cr.get(url, params=params, timeout=15, impersonate="chrome120")
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            total = data.get("data", {}).get("total", 0)
+            if not total:
+                continue
+
+            per_page = 100
+            max_pages = min(25, math.ceil(total / per_page))
+
+            # 逐页搜索目标股票
+            for page in range(1, max_pages + 1):
+                if page > 1:
+                    time.sleep(0.3)
+                    params["pn"] = page
+                    r = cr.get(url, params=params, timeout=15, impersonate="chrome120")
+                    if r.status_code != 200:
+                        break
+                    data = r.json()
+
+                diffs = data.get("data", {}).get("diff", [])
+                for idx, item in enumerate(diffs):
+                    if str(item.get("f12", "")).zfill(6) == code:
+                        # 找到目标股票，构造 DataFrame
+                        rank = (page - 1) * per_page + idx + 1
+                        row = {"排名": rank}
+                        row.update(item)
+                        df = pd.DataFrame([row])
+                        # 列名映射：按字段顺序重命名
+                        field_list = fields.split(",")
+                        rename_map = {}
+                        for i, fld in enumerate(field_list):
+                            if i < len(columns) - 1:  # -1 because "排名" is already added
+                                rename_map[fld] = columns[i + 1]
+                        df.rename(columns=rename_map, inplace=True)
+                        df["排名"] = rank
+                        # 只保留需要的列
+                        available_cols = [c for c in columns if c in df.columns]
+                        return df[available_cols]
+
+            # 搜完了也没找到
             return pd.DataFrame()
+        except Exception:
+            pass
+        time.sleep(0.2)
 
-        code_col = _find_col(df, ["代码", "股票代码", "证券代码"])
-        if code_col:
-            filtered = df[df[code_col].astype(str).str.zfill(6) == code]
-            return filtered.reset_index(drop=True)
+    # ========== 降级：排名API被封时，用单股历史流向数据构造等效输出 ==========
+    if ak is not None:
+        try:
+            df = ak.stock_individual_fund_flow(stock=code, market="sh")
+            if df is None or df.empty:
+                df = ak.stock_individual_fund_flow(stock=code, market="sz")
+            if df is not None and not df.empty:
+                days = {"今日": 1, "3日": 3, "5日": 5, "10日": 10}.get(indicator, 5)
+                recent = df.head(days)
+                latest = df.iloc[0]
 
-        return pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
+                prefix = "" if indicator == "今日" else indicator
+                result = {
+                    "代码": code,
+                    "名称": latest.get("股票名称", code),
+                    "最新价": latest.get("收盘价", latest.get("最新价", "N/A")),
+                    f"{prefix}涨跌幅" if prefix else "涨跌幅": "N/A",
+                    f"{prefix}主力净流入-净额": recent["主力净流入-净额"].sum() if "主力净流入-净额" in recent.columns else "N/A",
+                    f"{prefix}主力净流入-净占比": recent["主力净流入-净占比"].mean() if "主力净流入-净占比" in recent.columns else "N/A",
+                    f"{prefix}超大单净流入-净额": recent["超大单净流入-净额"].sum() if "超大单净流入-净额" in recent.columns else "N/A",
+                    f"{prefix}超大单净流入-净占比": recent["超大单净流入-净占比"].mean() if "超大单净流入-净占比" in recent.columns else "N/A",
+                    f"{prefix}大单净流入-净额": recent["大单净流入-净额"].sum() if "大单净流入-净额" in recent.columns else "N/A",
+                    f"{prefix}大单净流入-净占比": recent["大单净流入-净占比"].mean() if "大单净流入-净占比" in recent.columns else "N/A",
+                    f"{prefix}中单净流入-净额": recent["中单净流入-净额"].sum() if "中单净流入-净额" in recent.columns else "N/A",
+                    f"{prefix}中单净流入-净占比": recent["中单净流入-净占比"].mean() if "中单净流入-净占比" in recent.columns else "N/A",
+                    f"{prefix}小单净流入-净额": recent["小单净流入-净额"].sum() if "小单净流入-净额" in recent.columns else "N/A",
+                    f"{prefix}小单净流入-净占比": recent["小单净流入-净占比"].mean() if "小单净流入-净占比" in recent.columns else "N/A",
+                }
+                return pd.DataFrame([result])
+        except Exception:
+            pass
+
+    return pd.DataFrame()
+
 
 
 def fetch_margin_data(stock_code: str, lookback_days: int = 15) -> pd.DataFrame:

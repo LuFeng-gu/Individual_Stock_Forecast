@@ -83,59 +83,164 @@ def _resolve_stock_code(stock_name: str) -> str:
 
 
 def _fetch_stock_basic(stock_code: str) -> dict:
-    """Fetch basic stock info via akshare."""
-    try:
-        import akshare as ak
+    """Fetch basic stock info. Tries multiple CDN nodes to bypass server blocks."""
+    import time
+    from curl_cffi import requests as cr
 
-        df = ak.stock_individual_info_em(symbol=stock_code)
-        return dict(zip(df["item"], df["value"]))
-    except Exception as e:
-        return {"股票代码": stock_code, "股票简称": stock_code}
+    market_code = 1 if str(stock_code).startswith("6") else 0
+    params = {
+        "fltt": "2",
+        "invt": "2",
+        "fields": "f57,f58,f84,f85,f127,f116,f117,f189,f43",
+        "secid": f"{market_code}.{stock_code}",
+    }
+
+    # 东方财富主域名 push2 常被限制，轮询多个 CDN 子域名
+    domains = [
+        "1.push2.eastmoney.com",
+        "11.push2.eastmoney.com",
+        "22.push2.eastmoney.com",
+        "33.push2.eastmoney.com",
+        "44.push2.eastmoney.com",
+        "55.push2.eastmoney.com",
+        "66.push2.eastmoney.com",
+        "77.push2.eastmoney.com",
+        "88.push2.eastmoney.com",
+        "99.push2.eastmoney.com",
+    ]
+
+    for domain in domains:
+        try:
+            url = f"https://{domain}/api/qt/stock/get"
+            r = cr.get(url, params=params, timeout=10, impersonate="chrome120")
+            if r.status_code == 200:
+                data = r.json()
+                d = data.get("data", {})
+                if d:
+                    return {
+                        "股票代码": d.get("f57", stock_code),
+                        "股票简称": d.get("f58", stock_code),
+                        "总股本": d.get("f84"),
+                        "流通股": d.get("f85"),
+                        "行业": d.get("f127", "未知"),
+                        "总市值": d.get("f116"),
+                        "流通市值": d.get("f117"),
+                        "上市时间": d.get("f189"),
+                        "最新价": d.get("f43"),
+                    }
+        except Exception:
+            pass
+        time.sleep(0.2)
+
+    # 保底 fallback
+    return {"股票代码": stock_code, "股票简称": stock_code}
 
 
 def _fetch_recent_kline(stock_code: str, days: int = 10) -> list[dict]:
-    """Fetch recent daily K-line data."""
-    try:
-        import akshare as ak
+    """Fetch recent daily K-line data via curl_cffi with fallback nodes."""
+    import time
+    from curl_cffi import requests as cr
 
-        end = datetime.now()
-        start = end - timedelta(days=days + 15)
-        df = ak.stock_zh_a_hist(
-            symbol=stock_code,
-            period="daily",
-            start_date=start.strftime("%Y%m%d"),
-            end_date=end.strftime("%Y%m%d"),
-            adjust="qfq",
-        )
-        if df.empty:
-            return []
-        recent = df.tail(days)
-        return recent[["日期", "收盘", "涨跌幅", "成交量"]].to_dict("records")
-    except Exception as e:
-        return []
+    market_code = 1 if str(stock_code).startswith("6") else 0
+    params = {
+        "secid": f"{market_code}.{stock_code}",
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        "klt": "101",
+        "fqt": "0",
+        "end": "20500101",
+        "lmt": str(days + 30),
+    }
+
+    # push2his 多节点轮询
+    domains = [
+        "push2his.eastmoney.com",
+        "1.push2his.eastmoney.com",
+        "11.push2his.eastmoney.com",
+        "22.push2his.eastmoney.com",
+    ]
+
+    for domain in domains:
+        try:
+            url = f"https://{domain}/api/qt/stock/kline/get"
+            r = cr.get(url, params=params, timeout=15, impersonate="chrome120")
+            if r.status_code == 200:
+                data = r.json()
+                klines = data.get("data", {}).get("klines", [])
+                if not klines:
+                    continue
+                # Parse kline strings: date,open,close,high,low,volume,amount,amplitude,pct_change,change_amount,turnover
+                records = []
+                for line in klines[-days:]:
+                    parts = line.split(",")
+                    if len(parts) >= 6:
+                        records.append({
+                            "日期": parts[0],
+                            "收盘": float(parts[2]) if parts[2] else None,
+                            "涨跌幅": float(parts[8]) if len(parts) > 8 and parts[8] else None,
+                            "成交量": float(parts[5]) if parts[5] else None,
+                        })
+                return records
+        except Exception:
+            pass
+        time.sleep(0.2)
+
+    return []
 
 
 def _fetch_valuation(stock_code: str) -> dict:
-    """Fetch latest valuation metrics (PE, PB, etc.) from real-time market data."""
-    try:
-        import akshare as ak
+    """Fetch latest valuation metrics (PE, PB, etc.) via curl_cffi with fallback nodes."""
+    import time
+    from curl_cffi import requests as cr
 
-        # stock_zh_a_spot_em returns all A-shares real-time data including PE/PB
-        df = ak.stock_zh_a_spot_em()
-        if "代码" not in df.columns:
-            return {}
-        row = df[df["代码"] == stock_code]
-        if row.empty:
-            return {}
-        latest = row.iloc[0]
-        return {
-            "PE_DYNAMIC": latest.get("市盈率-动态", "N/A"),
-            "PB": latest.get("市净率", "N/A"),
-            "换手率": latest.get("换手率", "N/A"),
-            "振幅": latest.get("振幅", "N/A"),
-        }
-    except Exception as e:
-        return {}
+    market_code = 1 if str(stock_code).startswith("6") else 0
+    params = {
+        "fltt": "2",
+        "invt": "2",
+        "fields": "f44,f45,f60,f162,f167,f168",
+        "secid": f"{market_code}.{stock_code}",
+    }
+
+    domains = [
+        "push2.eastmoney.com",
+        "1.push2.eastmoney.com",
+        "11.push2.eastmoney.com",
+        "22.push2.eastmoney.com",
+        "33.push2.eastmoney.com",
+        "44.push2.eastmoney.com",
+        "55.push2.eastmoney.com",
+        "66.push2.eastmoney.com",
+        "77.push2.eastmoney.com",
+        "88.push2.eastmoney.com",
+        "99.push2.eastmoney.com",
+    ]
+
+    for domain in domains:
+        try:
+            url = f"https://{domain}/api/qt/stock/get"
+            r = cr.get(url, params=params, timeout=10, impersonate="chrome120")
+            if r.status_code == 200:
+                data = r.json()
+                d = data.get("data", {})
+                if not d:
+                    continue
+                high = d.get("f44")
+                low = d.get("f45")
+                prev = d.get("f60")
+                amplitude = None
+                if high and low and prev and prev != 0:
+                    amplitude = round((high - low) / prev * 100, 2)
+                return {
+                    "PE_DYNAMIC": d.get("f162", "N/A"),
+                    "PB": d.get("f167", "N/A"),
+                    "换手率": d.get("f168", "N/A"),
+                    "振幅": amplitude if amplitude is not None else "N/A",
+                }
+        except Exception:
+            pass
+        time.sleep(0.2)
+
+    return {}
 
 
 def _to_float(value) -> float | None:
@@ -522,68 +627,166 @@ def _fetch_news(stock_code: str, top_n: int = 5) -> list[dict]:
         return []
 
 
-def _fetch_hot_concepts(top_n: int = 10) -> list[dict]:
-    """Fetch today's hot concept sectors."""
-    try:
-        import akshare as ak
+# 全局缓存：程序运行期间只抓取一次热点概念，后续直接读取
+_HOT_CONCEPTS_RESULT: list[dict] | None = None
 
-        df = ak.stock_board_concept_name_em()
-        hot = df.nlargest(top_n, "涨跌幅")
-        return hot[["板块名称", "涨跌幅"]].to_dict("records")
-    except Exception as e:
+
+def _fetch_hot_concepts(top_n: int = 10) -> list[dict]:
+    """Fetch today's hot concept sectors from Sina Finance.
+    Uses Sina's concept board API which is not blocked by Eastmoney restrictions.
+    Results are cached globally during the program lifetime.
+    """
+    global _HOT_CONCEPTS_RESULT
+    import json
+    import re
+    from curl_cffi import requests as cr
+
+    if _HOT_CONCEPTS_RESULT is not None:
+        return _HOT_CONCEPTS_RESULT[:top_n]
+
+    try:
+        url = "http://money.finance.sina.com.cn/q/view/newFLJK.php"
+        params = {"param": "class", "client": "autocallidentifykey="}
+        r = cr.get(url, params=params, timeout=15, impersonate="chrome120")
+        if r.status_code != 200:
+            return []
+
+        # Parse JS variable: var S_Finance_bankuai_class = {"gn_xxx":"gn_xxx,name,count,price,change,...",...};
+        text = r.text
+        json_start = text.find("{", text.find("var S_Finance_bankuai_class"))
+        json_end = text.rfind("};")
+        if json_end == -1:
+            json_end = text.rfind("}")
+
+        data = json.loads(text[json_start : json_end + 1])
+
+        concepts = []
+        for v in data.values():
+            parts = v.split(",")
+            if len(parts) >= 5:
+                try:
+                    change = float(parts[4]) if parts[4] else 0.0
+                except ValueError:
+                    change = 0.0
+                concepts.append({
+                    "板块名称": parts[1],
+                    "涨跌幅": change,
+                })
+
+        # Sort by 涨跌幅 descending
+        concepts.sort(key=lambda x: x["涨跌幅"], reverse=True)
+        _HOT_CONCEPTS_RESULT = concepts
+        return concepts[:top_n]
+    except Exception:
         return []
 
 
 def _fetch_longhubang(stock_code: str) -> list[dict]:
-    """Fetch 龙虎榜 (Dragon Tiger List) data for a specific stock."""
+    """Fetch 龙虎榜 (Dragon Tiger List) data via curl_cffi directly."""
+    from curl_cffi import requests as cr
+
     try:
-        import akshare as ak
-        df = ak.stock_lhb_detail_em()
-        if df.empty or "代码" not in df.columns:
+        url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+        params = {
+            "sortColumns": "SECURITY_CODE,TRADE_DATE",
+            "sortTypes": "1,-1",
+            "pageSize": "50",
+            "pageNumber": "1",
+            "reportName": "RPT_DAILYBILLBOARD_DETAILSNEW",
+            "columns": "SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,EXPLAIN,CLOSE_PRICE,CHANGE_RATE",
+            "filter": f'(SECURITY_CODE="{stock_code}")',
+        }
+        r = cr.get(url, params=params, timeout=15, impersonate="chrome120")
+        if r.status_code != 200:
             return []
-        matched = df[df["代码"] == stock_code]
-        if matched.empty:
+
+        data = r.json()
+        result = data.get("result", {})
+        items = result.get("data", []) if result else []
+        if not items:
             return []
-        recent = matched.head(3)
-        cols = [c for c in ["代码", "名称", "上榜原因", "买入额", "卖出额", "净买入额"] if c in recent.columns]
-        return recent[cols].to_dict("records")
-    except Exception as e:
+
+        records = []
+        for item in items[:3]:
+            records.append({
+                "代码": item.get("SECURITY_CODE", ""),
+                "名称": item.get("SECURITY_NAME_ABBR", ""),
+                "上榜日期": item.get("TRADE_DATE", ""),
+                "上榜原因": item.get("EXPLAIN", ""),
+                "收盘价": item.get("CLOSE_PRICE", ""),
+                "涨跌幅": item.get("CHANGE_RATE", ""),
+            })
+        return records
+    except Exception:
         return []
 
 
 def _fetch_stock_hot_rank(stock_code: str) -> dict:
-    """Fetch stock popularity ranking from DongFangCaiFu."""
+    """Fetch stock popularity ranking via curl_cffi directly."""
+    from curl_cffi import requests as cr
+
     try:
-        import akshare as ak
-        df = ak.stock_hot_rank_em()
-        if df.empty:
+        # Convert stock code to Sina format (e.g., 600519 -> SH600519, 000001 -> SZ000001)
+        prefix = "SH" if str(stock_code).startswith("6") else "SZ"
+        sec_code = f"{prefix}{stock_code}"
+
+        url = "https://emappdata.eastmoney.com/stockrank/getAllCurrentList"
+        payload = {"appId": "appId01", "globalId": "globalId", "pageNo": 1, "pageSize": 100}
+        r = cr.post(url, json=payload, timeout=15, impersonate="chrome120")
+        if r.status_code != 200:
             return {}
-        code_col = "股票代码" if "股票代码" in df.columns else "代码"
-        if code_col not in df.columns:
+
+        data = r.json()
+        if data.get("status") != 0:
             return {}
-        row = df[df[code_col] == stock_code]
-        if row.empty:
-            return {}
-        latest = row.iloc[0]
-        rank_key = "排名" if "排名" in latest.index else "当前排名"
-        return {
-            "人气排名": latest.get(rank_key, "N/A"),
-        }
-    except Exception as e:
+
+        items = data.get("data", [])
+        for item in items:
+            if item.get("sc") == sec_code:
+                return {"人气排名": item.get("rk", "N/A")}
+
+        # Not in top 100
+        return {"人气排名": "100+"}
+    except Exception:
         return {}
 
 
 def _fetch_industry_sectors(top_n: int = 10) -> list[dict]:
-    """Fetch industry sector performance data for macro sentiment."""
+    """Fetch industry sector performance data from Sina Finance.
+    Uses Sina's industry board API which bypasses Eastmoney restrictions.
+    """
+    global _HOT_CONCEPTS_RESULT
+    import json
+    import re
+    from curl_cffi import requests as cr
+
     try:
-        import akshare as ak
-        df = ak.stock_board_industry_name_em()
-        if df.empty:
+        url = "http://money.finance.sina.com.cn/q/view/newFLJK.php"
+        r = cr.get(url, params={"param": "industry", "client": "autocallidentifykey="}, timeout=15, impersonate="chrome120")
+        if r.status_code != 200:
             return []
-        hot = df.nlargest(top_n, "涨跌幅")
-        cols = [c for c in ["板块名称", "涨跌幅"] if c in hot.columns]
-        return hot[cols].to_dict("records")
-    except Exception as e:
+
+        text = r.text
+        json_start = text.find("{", text.find("var S_Finance_bankuai_industry"))
+        json_end = text.rfind("}")
+        data = json.loads(text[json_start : json_end + 1])
+
+        sectors = []
+        for v in data.values():
+            parts = v.split(",")
+            if len(parts) >= 5:
+                try:
+                    change = float(parts[4]) if parts[4] else 0.0
+                except ValueError:
+                    change = 0.0
+                sectors.append({
+                    "板块名称": parts[1],
+                    "涨跌幅": change,
+                })
+
+        sectors.sort(key=lambda x: x["涨跌幅"], reverse=True)
+        return sectors[:top_n]
+    except Exception:
         return []
 
 
@@ -1254,14 +1457,14 @@ def sentiment_analysis_node(state: AgentState, planner: BasePlanner) -> dict:
     time_horizon = intent.time_horizon if intent else "medium"
 
     # --- Common data (shared by both branches) ---
-    news = _fetch_news(stock_code, top_n=5)
+    news = _fetch_news(stock_code, top_n=10)
     news_text = (
         "\n".join([f"  [{d['发布时间']}] {d['新闻标题']}" for d in news])
         if news
         else "暂无新闻"
     )
 
-    hot_concepts = _fetch_hot_concepts(top_n=5)
+    hot_concepts = _fetch_hot_concepts(top_n=10)
     concept_text = "\n".join(
         [f"  {c['板块名称']}: {c['涨跌幅']}%" for c in hot_concepts]
     )
@@ -1325,7 +1528,7 @@ def sentiment_analysis_node(state: AgentState, planner: BasePlanner) -> dict:
         log_error("sentiment_analysis", RuntimeError(f"Analysis failed: {e}"))
         evidence = FactorEvidence(
             factor_name="sentiment",
-            trend_signal="Neutral",
+            trend_signal="中性",
             score=50,
             key_findings=["情绪面数据获取或分析失败"],
         )

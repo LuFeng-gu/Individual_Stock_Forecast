@@ -534,6 +534,59 @@ def _fetch_hot_concepts(top_n: int = 10) -> list[dict]:
         return []
 
 
+def _fetch_longhubang(stock_code: str) -> list[dict]:
+    """Fetch 龙虎榜 (Dragon Tiger List) data for a specific stock."""
+    try:
+        import akshare as ak
+        df = ak.stock_lhb_detail_em()
+        if df.empty or "代码" not in df.columns:
+            return []
+        matched = df[df["代码"] == stock_code]
+        if matched.empty:
+            return []
+        recent = matched.head(3)
+        cols = [c for c in ["代码", "名称", "上榜原因", "买入额", "卖出额", "净买入额"] if c in recent.columns]
+        return recent[cols].to_dict("records")
+    except Exception as e:
+        return []
+
+
+def _fetch_stock_hot_rank(stock_code: str) -> dict:
+    """Fetch stock popularity ranking from DongFangCaiFu."""
+    try:
+        import akshare as ak
+        df = ak.stock_hot_rank_em()
+        if df.empty:
+            return {}
+        code_col = "股票代码" if "股票代码" in df.columns else "代码"
+        if code_col not in df.columns:
+            return {}
+        row = df[df[code_col] == stock_code]
+        if row.empty:
+            return {}
+        latest = row.iloc[0]
+        rank_key = "排名" if "排名" in latest.index else "当前排名"
+        return {
+            "人气排名": latest.get(rank_key, "N/A"),
+        }
+    except Exception as e:
+        return {}
+
+
+def _fetch_industry_sectors(top_n: int = 10) -> list[dict]:
+    """Fetch industry sector performance data for macro sentiment."""
+    try:
+        import akshare as ak
+        df = ak.stock_board_industry_name_em()
+        if df.empty:
+            return []
+        hot = df.nlargest(top_n, "涨跌幅")
+        cols = [c for c in ["板块名称", "涨跌幅"] if c in hot.columns]
+        return hot[cols].to_dict("records")
+    except Exception as e:
+        return []
+
+
 def _calculate_ma(kline: list[dict]) -> dict:
     """Calculate moving averages from kline data."""
     if len(kline) < 5:
@@ -1181,7 +1234,14 @@ def capital_analysis_node(state: AgentState, planner: BasePlanner) -> dict:
 
 
 def sentiment_analysis_node(state: AgentState, planner: BasePlanner) -> dict:
-    """Sentiment factor analysis: news, sector heat, events."""
+    """Sentiment factor analysis with dynamic branching based on time horizon.
+
+    Branch A (short-term / speculative): focuses on hot money, dragon tiger list,
+        popularity ranking, and event catalysts.
+    Branch B (mid/long-term / fundamental): focuses on macro industry trends,
+        policy narrative, and institutional sentiment.
+    Falls back to the original sentiment_system prompt if a branch prompt is missing.
+    """
     log_node_start("sentiment_analysis_node")
 
     if not _should_analyze(state, "sentiment"):
@@ -1191,7 +1251,9 @@ def sentiment_analysis_node(state: AgentState, planner: BasePlanner) -> dict:
     intent = state.get("user_intent")
     stock_code = intent.stock_code if intent else ""
     stock_name = intent.stock_name if intent else ""
+    time_horizon = intent.time_horizon if intent else "medium"
 
+    # --- Common data (shared by both branches) ---
     news = _fetch_news(stock_code, top_n=5)
     news_text = (
         "\n".join([f"  [{d['发布时间']}] {d['新闻标题']}" for d in news])
@@ -1204,9 +1266,48 @@ def sentiment_analysis_node(state: AgentState, planner: BasePlanner) -> dict:
         [f"  {c['板块名称']}: {c['涨跌幅']}%" for c in hot_concepts]
     )
 
-    sentiment_text = f"近期新闻:\n{news_text}\n\n热点板块:\n{concept_text}"
+    # --- Dynamic branching ---
+    if time_horizon == "short":
+        # Branch A: Short-term / Speculative scenario
+        log_info("sentiment_analysis", {"branch": "short_term"})
+        longhubang = _fetch_longhubang(stock_code)
+        lhb_text = "\n".join([
+            f"  {d.get('名称', stock_name)}: 上榜原因={d.get('上榜原因', 'N/A')}, "
+            f"买入额={d.get('买入额', 'N/A')}, 卖出额={d.get('卖出额', 'N/A')}, "
+            f"净买入额={d.get('净买入额', 'N/A')}"
+            for d in longhubang
+        ]) if longhubang else "未上龙虎榜"
 
-    system_prompt = _load_prompt("sentiment_system")
+        hot_rank = _fetch_stock_hot_rank(stock_code)
+        rank_text = f"人气排名: {hot_rank.get('人气排名', 'N/A')}" if hot_rank else "无人气排名数据"
+
+        sentiment_text = (
+            f"近期新闻:\n{news_text}\n\n"
+            f"热点板块:\n{concept_text}\n\n"
+            f"龙虎榜数据:\n{lhb_text}\n\n"
+            f"个股热度:\n{rank_text}"
+        )
+
+        branch_prompt = _load_prompt("sentiment_short_term")
+        system_prompt = branch_prompt if branch_prompt else _load_prompt("sentiment_system")
+    else:
+        # Branch B: Mid-to-Long term / Fundamental scenario (default)
+        log_info("sentiment_analysis", {"branch": "long_term"})
+        industry_sectors = _fetch_industry_sectors(top_n=10)
+        industry_text = "\n".join([
+            f"  {s.get('板块名称', 'N/A')}: {s.get('涨跌幅', 'N/A')}%"
+            for s in industry_sectors
+        ]) if industry_sectors else "暂无行业板块数据"
+
+        sentiment_text = (
+            f"近期新闻:\n{news_text}\n\n"
+            f"热点板块:\n{concept_text}\n\n"
+            f"行业板块行情:\n{industry_text}"
+        )
+
+        branch_prompt = _load_prompt("sentiment_long_term")
+        system_prompt = branch_prompt if branch_prompt else _load_prompt("sentiment_system")
+
     user_prompt = _load_prompt("sentiment_user").format(
         stock_name=stock_name,
         stock_code=stock_code,
@@ -1237,7 +1338,7 @@ def sentiment_analysis_node(state: AgentState, planner: BasePlanner) -> dict:
         confidence=0.6,
     )
 
-    log_node_end("sentiment_analysis_node", {"score": evidence.score})
+    log_node_end("sentiment_analysis_node", {"score": evidence.score, "branch": "short" if time_horizon == "short" else "long"})
     return {"sentiment_evidence": evidence, "evidence_log": [item]}
 
 

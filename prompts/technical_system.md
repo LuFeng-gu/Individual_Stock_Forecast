@@ -75,11 +75,11 @@ Return exactly one valid JSON object. Do not add explanations before or after it
 0-19: Strong downtrend, avoid or wait for reversal
 -->
 ## Key Findings Should Cover
-Trend direction (MA alignment)
-Momentum (MACD, RSI status)
-Volume pattern (expanding on rallies?)
-Position relative to support/resistance
-Rules
+- Trend direction (MA alignment)
+- Momentum (MACD, RSI status)
+- Volume pattern (expanding on rallies?)
+- Position relative to support/resistance
+
 
 ## Hard Rules
 <!--

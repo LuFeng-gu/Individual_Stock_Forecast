@@ -58,7 +58,6 @@ Return exactly one valid JSON object. Do not add explanations before or after it
 ```
 
 ## Scoring Guide (0-100)
-
 - Trend: 30 points. Consider MA alignment and closing price versus MA5/MA20/MA60.
 - Momentum: 20 points. Consider 5d/20d/60d returns and whether momentum is improving or fading.
 - Reversal/Overheat: 15 points. Consider RSI14 and BIAS. Penalize obvious overbought or oversold risk.
@@ -67,14 +66,14 @@ Return exactly one valid JSON object. Do not add explanations before or after it
 - Breakout: 10 points. Reward valid 20d/60d highs, but flag false-breakout risk if volume is weak or RSI/BIAS is overheated.
 
 
-
+<!--
 ## Scoring Guide (0-100)
 80-100: Strong uptrend, clear bullish signals, good entry timing
 60-79: Moderately bullish, some positive signals but with cautions
 40-59: Neutral/sideways, mixed signals, unclear direction
 20-39: Moderately bearish, warning signs present
 0-19: Strong downtrend, avoid or wait for reversal
-
+-->
 ## Key Findings Should Cover
 Trend direction (MA alignment)
 Momentum (MACD, RSI status)
